@@ -13,6 +13,7 @@ Service and local laws. Use with caution.
 from __future__ import annotations
 
 import json
+import time
 from datetime import datetime
 from typing import Any
 
@@ -24,6 +25,55 @@ from app.scrapers.base import BaseScraper
 from playwright.sync_api import Page
 
 logger = get_logger("app.scrapers.facebook")
+
+# ---------------------------------------------------------------------------
+# URL patterns that indicate Facebook has NOT yet landed on an authenticated
+# feed page.  We keep polling until the URL matches none of these.
+# ---------------------------------------------------------------------------
+_BLOCKED_URL_PATTERNS: tuple[str, ...] = (
+    "facebook.com/login",
+    "facebook.com/checkpoint",
+    "facebook.com/recover",
+    "facebook.com/two_step_verification",
+    "facebook.com/ajax/",
+    "facebook.com/identity",
+    "about:blank",
+)
+
+# URL fragments that confirm the user is on their authenticated home feed
+_SUCCESS_URL_PATTERNS: tuple[str, ...] = (
+    "facebook.com/?sk=",
+    "facebook.com/home",
+    "facebook.com/groups",
+    "facebook.com/profile",
+    # Bare homepage after redirect is just "https://www.facebook.com/"
+    # We match it via the absence of /login and /checkpoint (see _is_authenticated).
+)
+
+# How many seconds to keep polling before giving up
+_MAX_WAIT_SECONDS = 300  # 5 minutes — enough time for MFA
+_POLL_INTERVAL_SECONDS = 3
+
+
+def _is_authenticated(url: str) -> bool:
+    """Return True when the browser has landed on a genuine FB feed page."""
+    if any(pat in url for pat in _BLOCKED_URL_PATTERNS):
+        return False
+    # The bare homepage redirect after login ends at https://www.facebook.com/
+    # which contains none of the blocked patterns.
+    if "facebook.com" in url:
+        return True
+    return False
+
+
+def _is_checkpoint(url: str) -> bool:
+    """Return True when the browser is stuck on a security checkpoint page."""
+    return any(p in url for p in (
+        "checkpoint",
+        "recover",
+        "two_step_verification",
+        "identity",
+    ))
 
 
 class FacebookSourceScraper(BaseScraper):
@@ -204,11 +254,20 @@ class FacebookSourceScraper(BaseScraper):
 
     @classmethod
     def login_facebook(cls, browser_manager: BrowserManager, storage_state_path: str) -> None:
-        """Open persistent chrome browser and halt execution for manual credential login."""
+        """Open a non-headless browser and guide the user through manual Facebook login.
+
+        After the user submits their credentials Facebook sometimes shows a
+        checkpoint/security-challenge page (CAPTCHA, SMS code, identity
+        confirmation) or simply a white blank screen while it processes the
+        session.  The old implementation saved the storage state immediately
+        after the first ENTER press, capturing an unauthenticated state.
+
+        This version polls the browser URL every few seconds and only saves
+        the session once Facebook has redirected to a genuine authenticated
+        landing page.  If a checkpoint is detected the user is prompted to
+        resolve it in the browser window before the script continues.
+        """
         logger.info("Initializing Playwright manual session launch...")
-        # Start persistent browser in non-headless mode to let user interact.
-        # With a persistent context, all cookies, localStorage, and session data
-        # are automatically saved inside the user_data_dir when the context closes.
         context = browser_manager.get_persistent_context(
             storage_state_path=storage_state_path,
             headless=False,
@@ -216,25 +275,77 @@ class FacebookSourceScraper(BaseScraper):
         page = context.new_page()
 
         try:
-            logger.info("Navigating to facebook.com...")
-            page.goto("https://www.facebook.com/")
-            print("\n" + "=" * 80)
-            print("FACEBOOK MANUAL LOGIN ASSISTANCE:")
-            print("1. A browser window has opened to facebook.com.")
-            print("2. Enter your credentials and complete multi-factor auth.")
-            print("3. Verify you have loaded your home page feed correctly.")
-            print("4. Switch back to this console window.")
-            print("=" * 80)
-            input("\n--> Press ENTER in this console once you are fully logged in...")
+            # Navigate directly to the login form so credentials are immediately
+            # visible without an extra redirect step.
+            logger.info("Navigating to facebook.com/login...")
+            page.goto("https://www.facebook.com/login", wait_until="domcontentloaded")
 
-            # Also export a JSON snapshot as backup
+            print("\n" + "=" * 80)
+            print("FACEBOOK MANUAL LOGIN — INSTRUCTIONS")
+            print("=" * 80)
+            print("1. A browser window has opened on the Facebook login page.")
+            print("2. Enter your email / phone and password, then click Log In.")
+            print("3. Complete any 2-factor auth or security challenge in the browser.")
+            print("4. Wait until you can see your Facebook home feed (news feed).")
+            print("5. Once the feed is fully loaded, come back here and press ENTER.")
+            print("="  * 80)
+            print()
+            print("NOTE: If you see a white/blank screen after entering credentials,")
+            print("      Facebook is running a security check. Wait for it to finish")
+            print("      or follow any on-screen prompts before pressing ENTER.")
+            print("=" * 80)
+            input("\n--> Press ENTER once you are fully logged in and see your news feed...")
+
+            # ------------------------------------------------------------------
+            # Poll until the browser has landed on an authenticated page.
+            # This handles the checkpoint / white-screen scenario where the user
+            # presses ENTER too early (or Facebook is still loading).
+            # ------------------------------------------------------------------
+            print("\nVerifying login state, please wait...")
+            elapsed = 0
+            last_reported_url = ""
+
+            while elapsed < _MAX_WAIT_SECONDS:
+                current_url = page.url
+
+                if _is_authenticated(current_url):
+                    print(f"\n✔  Authenticated!  Current page: {current_url}")
+                    break
+
+                if current_url != last_reported_url:
+                    last_reported_url = current_url
+
+                    if _is_checkpoint(current_url):
+                        print()
+                        print("⚠  Facebook checkpoint detected!")
+                        print(f"   Current URL: {current_url}")
+                        print("   Please complete the security challenge in the browser window.")
+                        print("   This script will continue automatically once you land on the feed.")
+                    elif "about:blank" in current_url or not current_url:
+                        print("   Browser shows a blank page — Facebook is loading, please wait...")
+                    elif "login" in current_url:
+                        print("   Still on login page — credentials may have been rejected. Please try again.")
+                    else:
+                        print(f"   Waiting for feed page... (current: {current_url})")
+
+                time.sleep(_POLL_INTERVAL_SECONDS)
+                elapsed += _POLL_INTERVAL_SECONDS
+            else:
+                raise RuntimeError(
+                    f"Timed out after {_MAX_WAIT_SECONDS}s waiting for Facebook authentication. "
+                    "The browser may be stuck on a checkpoint or login page. "
+                    "Try running login-facebook again."
+                )
+
+            # Save storage state as JSON backup (best-effort)
             try:
                 browser_manager.save_storage_state(storage_state_path)
+                print(f"\n✔  Session state saved to: {storage_state_path}")
             except Exception as exc:
                 logger.warning("Could not export storage state JSON backup: %s", exc)
 
             logger.info("Facebook authentication successfully persisted in user_data_dir.")
+
         finally:
             page.close()
             browser_manager.stop()
-
