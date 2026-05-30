@@ -27,18 +27,16 @@ logger = get_logger("app.browser")
 # ---------------------------------------------------------------------------
 # Full stealth init script — injected before ANY page JS executes.
 #
-# Covers every signal Facebook's 2025/2026 bot-detection pipeline checks.
-# Critical additions vs. previous version:
-#   - window.chrome.loadTimes() and .csi()  ← most common missing patch
-#   - navigator.mimeTypes spoofing
-#   - Canvas fingerprint noise
-#   - iframe contentWindow isolation (nested iframes expose headless context)
-#   - toString() cloaking on all overridden functions
+# Key insight for the META white page:
+#   Facebook reads window.outerWidth / window.outerHeight on load.
+#   Playwright sets viewport correctly but does NOT set outerWidth/outerHeight —
+#   they stay at whatever the OS window reports, which is often a small or
+#   inconsistent value. FB sees a mismatch between screen (1920x1080) and
+#   outerWidth (e.g. 800) and triggers the bot checkpoint.
+#   Fix: spoof outerWidth/outerHeight to match the viewport we configured.
 # ---------------------------------------------------------------------------
 _STEALTH_SCRIPT = """
 // ── 1. navigator.webdriver ──────────────────────────────────────────────
-// Must be `undefined`, NOT `false` — detectors specifically check for
-// the value `false` as a sign of a patched (not genuine) browser.
 Object.defineProperty(navigator, 'webdriver', {
     get: () => undefined,
     configurable: true,
@@ -48,8 +46,6 @@ Object.defineProperty(navigator, 'webdriver', {
 try { delete window.__playwright; } catch(_) {}
 try { delete window.__pw_manual; } catch(_) {}
 try { delete window._playwrightChannelHandle; } catch(_) {}
-
-// Remove cdc_ / $cdc_ Playwright driver handle that persists in the DOM
 (function() {
     try {
         const k = Object.keys(document).find(k => k.startsWith('cdc_') || k.startsWith('$cdc_'));
@@ -57,9 +53,20 @@ try { delete window._playwrightChannelHandle; } catch(_) {}
     } catch(_) {}
 })();
 
-// ── 3. navigator.plugins + mimeTypes ────────────────────────────────────
-// Headless Chrome reports 0 plugins — instant giveaway.
-// Use proper Plugin prototype objects with correct namedItem/item methods.
+// ── 3. window.outerWidth / outerHeight ───────────────────────────────────
+// THIS IS THE PRIMARY CAUSE OF THE META WHITE PAGE.
+// Playwright does not set outerWidth/outerHeight, so they return whatever
+// the OS window size is (often ~800px or inconsistent). Facebook reads these
+// on page load and flags the mismatch with screen.width (1920).
+// Must match the viewport we pass to launch_persistent_context.
+try {
+    Object.defineProperty(window, 'outerWidth',  { get: () => 1920, configurable: true });
+    Object.defineProperty(window, 'outerHeight', { get: () => 1080, configurable: true });
+    Object.defineProperty(window, 'innerWidth',  { get: () => 1920, configurable: true });
+    Object.defineProperty(window, 'innerHeight', { get: () => 1080, configurable: true });
+} catch(_) {}
+
+// ── 4. navigator.plugins + mimeTypes ────────────────────────────────────
 const _pluginData = [
     { name: 'PDF Viewer',                description: 'Portable Document Format', filename: 'internal-pdf-viewer' },
     { name: 'Chrome PDF Viewer',         description: '',                          filename: 'internal-pdf-viewer' },
@@ -85,24 +92,19 @@ Object.defineProperty(navigator, 'plugins', {
     configurable: true,
 });
 Object.defineProperty(navigator, 'mimeTypes', {
-    get: () => ({
-        length:    2,
-        item:      () => null,
-        namedItem: () => null,
-    }),
+    get: () => ({ length: 2, item: () => null, namedItem: () => null }),
     configurable: true,
 });
 
-// ── 4. navigator.languages / language ───────────────────────────────────
+// ── 5. navigator.languages / language ───────────────────────────────────
 Object.defineProperty(navigator, 'language',  { get: () => 'en-US', configurable: true });
 Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en', 'cs'], configurable: true });
 
-// ── 5. Hardware concurrency + device memory ──────────────────────────────
+// ── 6. Hardware concurrency + device memory ──────────────────────────────
 Object.defineProperty(navigator, 'hardwareConcurrency', { get: () => 8, configurable: true });
 Object.defineProperty(navigator, 'deviceMemory',        { get: () => 8, configurable: true });
 
-// ── 6. window.chrome (most commonly INCOMPLETE in stealth libraries) ─────
-// Must include loadTimes() and csi() — their absence is a primary FB signal.
+// ── 7. window.chrome (loadTimes + csi are critical — absence is top-5 signal)
 window.chrome = {
     app: {
         isInstalled: false,
@@ -113,13 +115,12 @@ window.chrome = {
         id: undefined,
         connect:     () => {},
         sendMessage: () => {},
-        OnInstalledReason:      { CHROME_UPDATE: 'chrome_update', INSTALL: 'install', SHARED_MODULE_UPDATE: 'shared_module_update', UPDATE: 'update' },
-        OnRestartRequiredReason:{ APP_UPDATE: 'app_update', OS_UPDATE: 'os_update', PERIODIC: 'periodic' },
-        PlatformArch:           { ARM: 'arm', ARM64: 'arm64', MIPS: 'mips', MIPS64: 'mips64', X86_32: 'x86-32', X86_64: 'x86-64' },
-        PlatformOs:             { ANDROID: 'android', CROS: 'cros', LINUX: 'linux', MAC: 'mac', OPENBSD: 'openbsd', WIN: 'win' },
+        OnInstalledReason:       { CHROME_UPDATE: 'chrome_update', INSTALL: 'install', SHARED_MODULE_UPDATE: 'shared_module_update', UPDATE: 'update' },
+        OnRestartRequiredReason: { APP_UPDATE: 'app_update', OS_UPDATE: 'os_update', PERIODIC: 'periodic' },
+        PlatformArch:            { ARM: 'arm', ARM64: 'arm64', MIPS: 'mips', MIPS64: 'mips64', X86_32: 'x86-32', X86_64: 'x86-64' },
+        PlatformOs:              { ANDROID: 'android', CROS: 'cros', LINUX: 'linux', MAC: 'mac', OPENBSD: 'openbsd', WIN: 'win' },
         RequestUpdateCheckStatus:{ NO_UPDATE: 'no_update', THROTTLED: 'throttled', UPDATE_AVAILABLE: 'update_available' },
     },
-    // loadTimes() — absence is a top-5 FB detection signal
     loadTimes: function() {
         return {
             requestTime:             Date.now() / 1000,
@@ -137,7 +138,6 @@ window.chrome = {
             connectionInfo:          'http/1.1',
         };
     },
-    // csi() — same as above
     csi: function() {
         return {
             startE: Date.now(),
@@ -148,37 +148,31 @@ window.chrome = {
     },
 };
 
-// ── 7. Notification.permission ───────────────────────────────────────────
-// Headless returns 'denied' by default — FB checks this.
+// ── 8. Notification.permission + permissions.query ──────────────────────
 try {
     Object.defineProperty(Notification, 'permission', { get: () => 'default', configurable: true });
 } catch(_) {}
-
-// ── 8. navigator.permissions.query ──────────────────────────────────────
 const _origPermQuery = navigator.permissions && navigator.permissions.query.bind(navigator.permissions);
 if (_origPermQuery) {
     navigator.permissions.query = (params) => {
         if (params && params.name === 'notifications') {
-            return Promise.resolve({ state: Notification.permission, onchange: null });
+            return Promise.resolve({ state: 'default', onchange: null });
         }
         return _origPermQuery(params);
     };
 }
 
 // ── 9. WebGL fingerprint ─────────────────────────────────────────────────
-// Headless often returns SwiftShader — a direct bot signal.
 try {
     const _getParam = WebGLRenderingContext.prototype.getParameter;
     WebGLRenderingContext.prototype.getParameter = function(param) {
-        if (param === 37445) return 'Intel Inc.';               // UNMASKED_VENDOR_WEBGL
-        if (param === 37446) return 'Intel Iris OpenGL Engine'; // UNMASKED_RENDERER_WEBGL
+        if (param === 37445) return 'Intel Inc.';
+        if (param === 37446) return 'Intel Iris OpenGL Engine';
         return _getParam.call(this, param);
     };
 } catch(_) {}
 
 // ── 10. Canvas fingerprint noise ─────────────────────────────────────────
-// Identical canvas outputs across sessions is a fingerprinting signal.
-// Add imperceptible noise so each session has a unique canvas hash.
 try {
     const _toDataURL = HTMLCanvasElement.prototype.toDataURL;
     HTMLCanvasElement.prototype.toDataURL = function(type, ...args) {
@@ -186,7 +180,7 @@ try {
         if (ctx) {
             const imgData = ctx.getImageData(0, 0, this.width, this.height);
             for (let i = 0; i < imgData.data.length; i += 100) {
-                imgData.data[i] ^= Math.floor(Math.random() * 2); // flip ±1 LSB
+                imgData.data[i] ^= Math.floor(Math.random() * 2);
             }
             ctx.putImageData(imgData, 0, 0);
         }
@@ -203,8 +197,6 @@ Object.defineProperty(screen, 'colorDepth',  { get: () => 24,   configurable: tr
 Object.defineProperty(screen, 'pixelDepth',  { get: () => 24,   configurable: true });
 
 // ── 12. iframe contentWindow isolation ───────────────────────────────────
-// Nested iframes can expose the raw headless context bypassing all patches.
-// Override createElement to inject the webdriver patch into each new iframe.
 try {
     const _origCreateElement = document.createElement.bind(document);
     document.createElement = function(...args) {
@@ -216,9 +208,9 @@ try {
                         ? HTMLIFrameElement.prototype.__lookupGetter__('contentWindow').call(this)
                         : null;
                     if (win) {
-                        try {
-                            Object.defineProperty(win.navigator, 'webdriver', { get: () => undefined, configurable: true });
-                        } catch(_) {}
+                        try { Object.defineProperty(win.navigator, 'webdriver', { get: () => undefined, configurable: true }); } catch(_) {}
+                        try { Object.defineProperty(win, 'outerWidth',  { get: () => 1920, configurable: true }); } catch(_) {}
+                        try { Object.defineProperty(win, 'outerHeight', { get: () => 1080, configurable: true }); } catch(_) {}
                     }
                     return win;
                 },
@@ -230,19 +222,19 @@ try {
 } catch(_) {}
 
 // ── 13. Cloak toString() on all overridden functions ─────────────────────
-// Some detectors call fn.toString() and check for 'native code'.
-// Restore the native toString representation on patched functions.
-const _nativeToString = Function.prototype.toString;
 const _cloakFn = (fn) => {
-    Object.defineProperty(fn, 'toString', {
-        value: () => `function ${fn.name || 'get'}() { [native code] }`,
-        configurable: true,
-        writable: true,
-    });
+    if (!fn) return;
+    try {
+        Object.defineProperty(fn, 'toString', {
+            value: () => `function ${fn.name || 'get'}() { [native code] }`,
+            configurable: true,
+            writable: true,
+        });
+    } catch(_) {}
 };
-_cloakFn(WebGLRenderingContext.prototype.getParameter);
-_cloakFn(HTMLCanvasElement.prototype.toDataURL);
-_cloakFn(document.createElement);
+try { _cloakFn(WebGLRenderingContext.prototype.getParameter); } catch(_) {}
+try { _cloakFn(HTMLCanvasElement.prototype.toDataURL); } catch(_) {}
+try { _cloakFn(document.createElement); } catch(_) {}
 """
 
 
@@ -298,7 +290,13 @@ class BrowserManager:
 
         Uses the user's real Chrome installation (channel='chrome') combined with
         a comprehensive stealth init-script to bypass Facebook's bot detection,
-        including the META white-page checkpoint introduced in late 2025.
+        including the META white-page checkpoint.
+
+        Key fix for white page: do NOT pass a fixed viewport here.
+        Instead use viewport=None so Playwright doesn't constrain the window,
+        then spoof outerWidth/outerHeight/innerWidth/innerHeight via the init
+        script. Passing a fixed viewport while also passing --start-maximized
+        creates a mismatch that FB detects.
         """
         if self._playwright:
             self.stop()
@@ -321,8 +319,24 @@ class BrowserManager:
             user_data_dir=str(user_data),
             channel="chrome",
             headless=is_headless,
-            viewport={"width": 1920, "height": 1080},
-            screen={"width": 1920, "height": 1080},
+            # viewport=None lets Chrome own its window size (avoids the mismatch
+            # between Playwright's forced viewport and window.outerWidth that
+            # triggers Facebook's bot checkpoint).
+            viewport=None,
+            # Still tell Chrome to start at a large window so the JS spoof is
+            # consistent with the actual OS window size.
+            args=[
+                "--disable-blink-features=AutomationControlled",
+                "--disable-dev-shm-usage",
+                "--no-sandbox",
+                "--disable-infobars",
+                # Use a specific window size instead of --start-maximized which
+                # produces unpredictable values depending on the display.
+                "--window-size=1920,1080",
+                "--window-position=0,0",
+                "--disable-notifications",
+                "--hide-crash-restore-bubble",
+            ],
             locale="en-US",
             timezone_id="Europe/Prague",
             user_agent=(
@@ -331,15 +345,6 @@ class BrowserManager:
                 "Chrome/125.0.0.0 Safari/537.36"
             ),
             ignore_default_args=["--enable-automation"],
-            args=[
-                "--disable-blink-features=AutomationControlled",
-                "--disable-dev-shm-usage",
-                "--no-sandbox",
-                "--disable-infobars",
-                "--start-maximized",
-                "--disable-notifications",
-                "--hide-crash-restore-bubble",
-            ],
             permissions=["notifications", "geolocation"],
         )
         self.context.set_default_timeout(30000)
@@ -413,7 +418,7 @@ class BrowserManager:
 
     @staticmethod
     def extract_text(parent: Any, selector: str) -> Optional[str]:
-        """Safely extract stripped inner text from a element or locator."""
+        """Safely extract stripped inner text from an element."""
         try:
             elem = parent.query_selector(selector)
             if elem:
@@ -462,7 +467,7 @@ class BrowserManager:
 
     @staticmethod
     def scroll_n_times(page: Page, n: int, pause_ms: int = 1500) -> None:
-        """Scroll page multiple times with human-like jitter to avoid bot patterns."""
+        """Scroll page multiple times with human-like jitter."""
         for i in range(n):
             logger.debug("Scroll execution: %d/%d", i + 1, n)
             fraction = random.uniform(0.6, 1.0)
