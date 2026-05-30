@@ -20,6 +20,7 @@ from typing import Any
 import undetected_chromedriver as uc
 from selenium.webdriver.common.by import By
 from selenium.webdriver.common.action_chains import ActionChains
+from selenium.common.exceptions import NoSuchElementException, WebDriverException
 
 from app.browser import BrowserManager
 from app.config import AppSettings, SiteConfig
@@ -35,6 +36,9 @@ _POST_SELECTOR_CANDIDATES = [
     "div[data-pagelet^='FeedUnit']",
     "div[data-testid='fbfeed_story']",
 ]
+
+# Selector for the "close" button on the login/signup popup overlay
+_POPUP_CLOSE_SELECTOR = "[aria-label='Close'][role='button'], [aria-label='close'][role='button']"
 
 
 class FacebookSourceScraper(BaseScraper):
@@ -75,8 +79,11 @@ class FacebookSourceScraper(BaseScraper):
         logger.info("Loading Facebook group URL: %s", group_url)
         driver.get(group_url)
 
-        # Simulate a human pause before doing anything
+        # Allow page to settle
         self._human_pause(2500, 4500)
+
+        # Dismiss login/signup popup overlay if present
+        self._dismiss_popup(driver)
 
         # Move the mouse to a random position to look alive
         try:
@@ -86,10 +93,10 @@ class FacebookSourceScraper(BaseScraper):
         except Exception:
             pass
 
-        # Check for login wall
+        # Check for hard login wall (full redirect to login page)
         if self._is_login_wall(driver):
             logger.error(
-                "Facebook login screen detected. Please run: py -m app.cli login-facebook"
+                "Facebook login screen detected. Please run: python -m app.cli login-facebook"
             )
             return []
 
@@ -123,18 +130,37 @@ class FacebookSourceScraper(BaseScraper):
         return group_listings
 
     # ------------------------------------------------------------------
+    # Popup / overlay dismissal
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _dismiss_popup(driver: uc.Chrome) -> None:
+        """Close the Facebook login/signup overlay popup if it appears."""
+        try:
+            close_btn = driver.find_element(By.CSS_SELECTOR, _POPUP_CLOSE_SELECTOR)
+            if close_btn.is_displayed():
+                close_btn.click()
+                logger.info("Dismissed Facebook login popup overlay.")
+                time.sleep(0.8)  # brief settle after dismissal
+        except NoSuchElementException:
+            pass  # no popup, perfectly fine
+        except Exception as exc:
+            logger.debug("Popup dismiss attempt failed (non-fatal): %s", exc)
+
+    # ------------------------------------------------------------------
     # Detection helpers
     # ------------------------------------------------------------------
 
     @staticmethod
     def _is_login_wall(driver: uc.Chrome) -> bool:
-        """Return True if Facebook is showing the login gate."""
+        """Return True if Facebook is showing a hard login gate (full redirect)."""
         if "login" in driver.current_url:
             return True
         try:
-            driver.find_element(By.CSS_SELECTOR, "input[name='email'], input[name='pass']")
+            driver.find_element(By.CSS_SELECTOR, "input[name='email']")
+            driver.find_element(By.CSS_SELECTOR, "input[name='pass']")
             return True
-        except Exception:
+        except NoSuchElementException:
             pass
         return False
 
@@ -168,7 +194,6 @@ class FacebookSourceScraper(BaseScraper):
             driver.execute_script(
                 f"window.scrollBy({{ top: window.innerHeight * {fraction:.2f}, behavior: 'smooth' }});"
             )
-            # Occasionally wiggle the mouse mid-scroll
             if random.random() < 0.4:
                 try:
                     ActionChains(driver).move_by_offset(
@@ -199,7 +224,6 @@ class FacebookSourceScraper(BaseScraper):
 
     def _parse_post(self, post: Any, idx: int, group_url: str) -> RawListing | None:
         """Extract all relevant fields from a single post element."""
-        # Extract main text — grab the longest dir=auto div as the body
         text_elements = post.find_elements(By.CSS_SELECTOR, "div[dir='auto']")
         text_content = ""
         for te in text_elements:
@@ -208,18 +232,15 @@ class FacebookSourceScraper(BaseScraper):
                 text_content = txt
 
         if not text_content:
-            return None  # skip image-only posts
+            return None
 
-        # Keyword exclusion filter
         desc_lower = text_content.lower()
         for kw in self.site_config.filters.exclude_keywords:
             if kw.lower() in desc_lower:
                 return None
 
-        # Extract permalink
         permalink = self._extract_permalink(post, group_url, idx)
 
-        # Extract images (skip tiny UI assets)
         image_urls = []
         for img in post.find_elements(By.CSS_SELECTOR, "img[src]"):
             src = img.get_attribute("src") or ""
@@ -227,23 +248,20 @@ class FacebookSourceScraper(BaseScraper):
                 image_urls.append(src)
         primary_img = image_urls[0] if image_urls else None
 
-        # Poster name
         poster_name = None
         try:
             poster_elem = post.find_element(By.CSS_SELECTOR, "strong span, a[role='link'] span")
             poster_name = (poster_elem.text or "").strip() or None
-        except Exception:
+        except NoSuchElementException:
             pass
 
-        # Timestamp text
         timestamp_text = None
         try:
             time_elem = post.find_element(By.CSS_SELECTOR, "a[role='link'] span[id]")
             timestamp_text = (time_elem.text or "").strip() or None
-        except Exception:
+        except NoSuchElementException:
             pass
 
-        # Title = first non-empty line, capped at 80 chars
         lines = [line.strip() for line in text_content.split("\n") if line.strip()]
         title = lines[0][:80] if lines else "Facebook Post"
 
@@ -291,7 +309,7 @@ class FacebookSourceScraper(BaseScraper):
                     if not clean.startswith("http"):
                         clean = "https://www.facebook.com" + clean
                     return clean
-            except Exception:
+            except NoSuchElementException:
                 continue
         return f"{group_url}#post_{idx}"
 

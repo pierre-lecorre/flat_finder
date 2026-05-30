@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import random
 import time
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional
 
@@ -54,7 +55,6 @@ class BrowserManager:
     ) -> uc.ChromeOptions:
         opts = uc.ChromeOptions()
         if headless:
-            # uc headless still patches fingerprints; avoids extra window
             opts.add_argument("--headless=new")
         if user_data_dir:
             opts.add_argument(f"--user-data-dir={user_data_dir}")
@@ -81,15 +81,7 @@ class BrowserManager:
     def get_persistent_context(
         self, storage_state_path: str, headless: Optional[bool] = None
     ) -> uc.Chrome:
-        """Launch Chrome with a persistent user-data-dir for logged-in sessions.
-
-        undetected-chromedriver patches the binary, removes webdriver flags,
-        and uses the real Chrome install — no Playwright viewport bugs.
-        The user-data-dir persists cookies/localStorage across runs just like
-        Playwright's launch_persistent_context did.
-
-        Returns the driver directly (acts as its own "context").
-        """
+        """Launch Chrome with a persistent user-data-dir for logged-in sessions."""
         if self.driver:
             self.stop()
 
@@ -108,7 +100,7 @@ class BrowserManager:
         return self.driver
 
     def save_storage_state(self, path: str) -> None:
-        """Export cookies to a JSON file (Netscape/JSON format via selenium)."""
+        """Export cookies to a JSON file."""
         if not self.driver:
             logger.warning("No driver available to save storage state.")
             return
@@ -131,7 +123,7 @@ class BrowserManager:
         logger.info("Browser driver stopped.")
 
     def new_page(self) -> uc.Chrome:
-        """Open a new tab and switch to it; return the driver (acts as the page)."""
+        """Open a new tab and switch to it; return the driver."""
         if not self.driver:
             self.start()
         self.driver.execute_script("window.open('');")
@@ -143,7 +135,7 @@ class BrowserManager:
     # ------------------------------------------------------------------
 
     def navigate(self, page: uc.Chrome, url: str, wait_rules: WaitRules) -> None:
-        """Navigate to URL and optionally wait for a CSS selector."""
+        """Navigate to URL and wait for selector; logs a warning on timeout (non-fatal)."""
         logger.info("Navigating to: %s", url)
         page.get(url)
         if wait_rules.wait_for_selector:
@@ -153,7 +145,12 @@ class BrowserManager:
                     EC.presence_of_element_located((By.CSS_SELECTOR, wait_rules.wait_for_selector))
                 )
             except TimeoutException:
-                logger.warning("Selector '%s' not found within timeout.", wait_rules.wait_for_selector)
+                # Non-fatal: log and continue — cards may still be in the DOM
+                logger.warning(
+                    "Selector '%s' not found within %.1fs — continuing anyway.",
+                    wait_rules.wait_for_selector,
+                    wait_rules.timeout_ms / 1000,
+                )
 
     @staticmethod
     def wait_for(page: uc.Chrome, selector: str, timeout_ms: int = 10_000) -> None:
@@ -168,7 +165,6 @@ class BrowserManager:
 
     @staticmethod
     def extract_text(parent: Any, selector: str) -> Optional[str]:
-        """Safely extract stripped inner text from a CSS selector."""
         try:
             elem = parent.find_element(By.CSS_SELECTOR, selector)
             txt = elem.text
@@ -178,7 +174,6 @@ class BrowserManager:
 
     @staticmethod
     def extract_attr(parent: Any, selector: str, attr: str) -> Optional[str]:
-        """Safely extract an HTML attribute value from a CSS selector."""
         try:
             elem = parent.find_element(By.CSS_SELECTOR, selector)
             val = elem.get_attribute(attr)
@@ -188,7 +183,6 @@ class BrowserManager:
 
     @staticmethod
     def extract_all_texts(parent: Any, selector: str) -> list[str]:
-        """Safely extract stripped texts from all matching nodes."""
         try:
             elements = parent.find_elements(By.CSS_SELECTOR, selector)
             return [t for elem in elements if (t := (elem.text or "").strip())]
@@ -197,7 +191,6 @@ class BrowserManager:
 
     @staticmethod
     def extract_all_attrs(parent: Any, selector: str, attr: str) -> list[str]:
-        """Safely extract attributes from all matching nodes."""
         try:
             elements = parent.find_elements(By.CSS_SELECTOR, selector)
             return [a for elem in elements if (a := (elem.get_attribute(attr) or "").strip())]
@@ -210,14 +203,12 @@ class BrowserManager:
 
     @staticmethod
     def scroll_to_bottom(page: uc.Chrome, pause_ms: int = 1500) -> None:
-        """Scroll to the bottom of the page to trigger lazy loads."""
         logger.debug("Scrolling to bottom of page...")
         page.execute_script("window.scrollTo(0, document.body.scrollHeight);")
         time.sleep(pause_ms / 1000.0)
 
     @staticmethod
     def scroll_n_times(page: uc.Chrome, n: int, pause_ms: int = 1500) -> None:
-        """Scroll the page n times with human-like jitter."""
         for i in range(n):
             logger.debug("Scroll %d/%d", i + 1, n)
             fraction = random.uniform(0.6, 1.0)
@@ -229,7 +220,6 @@ class BrowserManager:
 
     @staticmethod
     def human_mouse_move(page: uc.Chrome) -> None:
-        """Move mouse to a random position to simulate human presence."""
         from selenium.webdriver.common.action_chains import ActionChains
         x = random.randint(200, 1600)
         y = random.randint(200, 900)
@@ -237,7 +227,6 @@ class BrowserManager:
 
     @staticmethod
     def polite_delay(min_ms: int = 1000, max_ms: int = 3000) -> None:
-        """Polite rate-limiting delay."""
         delay = random.randint(min_ms, max_ms) / 1000.0
         logger.debug("Polite delay: %.2fs", delay)
         time.sleep(delay)
@@ -245,7 +234,6 @@ class BrowserManager:
     @staticmethod
     def screenshot_on_error(page: uc.Chrome, name: str, screenshots_dir: Path) -> None:
         """Capture a PNG screenshot on scraping failure."""
-        from datetime import datetime
         try:
             screenshots_dir.mkdir(parents=True, exist_ok=True)
             timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
