@@ -24,6 +24,116 @@ from playwright.sync_api import (
 
 logger = get_logger("app.browser")
 
+# ---------------------------------------------------------------------------
+# Stealth init script — injected before ANY page JS executes.
+# Patches every primary signal Facebook's bot-detection pipeline checks:
+#   - navigator.webdriver
+#   - navigator.plugins / mimeTypes
+#   - navigator.languages
+#   - window.chrome runtime
+#   - Notification.permission spoofing
+#   - WebGL vendor / renderer strings
+#   - hardware concurrency & device memory
+#   - chrome cdc_ / $cdc_ driver handle (Playwright-specific)
+#   - Permission query override (headless returns 'denied' by default)
+# ---------------------------------------------------------------------------
+_STEALTH_SCRIPT = """
+// 1. Primary webdriver flag
+Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+
+// 2. Remove Playwright-injected globals
+try { delete window.__playwright; } catch(_) {}
+try { delete window.__pw_manual; } catch(_) {}
+try { delete window._playwrightChannelHandle; } catch(_) {}
+
+// 3. Plugins — headless Chrome reports [] which is an instant giveaway
+const makePlugin = (name, filename, description) => {
+    const p = Object.create(Plugin.prototype);
+    Object.defineProperty(p, 'name',        { value: name });
+    Object.defineProperty(p, 'filename',    { value: filename });
+    Object.defineProperty(p, 'description', { value: description });
+    return p;
+};
+const fakePlugins = [
+    makePlugin('Chrome PDF Plugin',           'internal-pdf-viewer',   'Portable Document Format'),
+    makePlugin('Chrome PDF Viewer',           'mhjfbmdgcfjbbpaeojofohoefgiehjai', ''),
+    makePlugin('Native Client',               'internal-nacl-plugin',  ''),
+    makePlugin('Widevine Content Decryption Module', 'widevinecdmadapter.dll', 'Enables Widevine licenses for playback'),
+    makePlugin('Microsoft Edge PDF Viewer',   'msedgepdfexe',          'Portable Document Format'),
+];
+Object.defineProperty(navigator, 'plugins', {
+    get: () => fakePlugins,
+    configurable: true,
+});
+
+// 4. Languages — match a typical Czech/English browser
+Object.defineProperty(navigator, 'languages', {
+    get: () => ['en-US', 'en', 'cs'],
+    configurable: true,
+});
+
+// 5. Hardware concurrency + device memory (headless sometimes reports odd values)
+Object.defineProperty(navigator, 'hardwareConcurrency', { get: () => 8 });
+Object.defineProperty(navigator, 'deviceMemory',        { get: () => 8 });
+
+// 6. window.chrome — must look exactly like a real installed Chrome
+window.chrome = {
+    app: { isInstalled: false, InstallState: { DISABLED: 'disabled', INSTALLED: 'installed', NOT_INSTALLED: 'not_installed' }, RunningState: { CANNOT_RUN: 'cannot_run', READY_TO_RUN: 'ready_to_run', RUNNING: 'running' } },
+    runtime: {
+        OnInstalledReason: { CHROME_UPDATE: 'chrome_update', INSTALL: 'install', SHARED_MODULE_UPDATE: 'shared_module_update', UPDATE: 'update' },
+        OnRestartRequiredReason: { APP_UPDATE: 'app_update', OS_UPDATE: 'os_update', PERIODIC: 'periodic' },
+        PlatformArch: { ARM: 'arm', ARM64: 'arm64', MIPS: 'mips', MIPS64: 'mips64', X86_32: 'x86-32', X86_64: 'x86-64' },
+        PlatformNaclArch: { ARM: 'arm', MIPS: 'mips', MIPS64: 'mips64', X86_32: 'x86-32', X86_64: 'x86-64' },
+        PlatformOs: { ANDROID: 'android', CROS: 'cros', LINUX: 'linux', MAC: 'mac', OPENBSD: 'openbsd', WIN: 'win' },
+        RequestUpdateCheckStatus: { NO_UPDATE: 'no_update', THROTTLED: 'throttled', UPDATE_AVAILABLE: 'update_available' },
+    },
+};
+
+// 7. Notification.permission — headless returns 'denied' which FB flags
+const origQuery = window.Notification ? window.Notification.requestPermission.bind(Notification) : null;
+try {
+    Object.defineProperty(Notification, 'permission', { get: () => 'default' });
+} catch(_) {}
+
+// 8. Permissions API — navigator.permissions.query({ name: 'notifications' })
+//    returns 'denied' in headless; spoof to 'default'
+const origPermQuery = navigator.permissions && navigator.permissions.query.bind(navigator.permissions);
+if (origPermQuery) {
+    navigator.permissions.query = (params) => {
+        if (params && params.name === 'notifications') {
+            return Promise.resolve({ state: 'default', onchange: null });
+        }
+        return origPermQuery(params);
+    };
+}
+
+// 9. WebGL fingerprint — headless often reports SwiftShader which is a bot signal
+try {
+    const getParam = WebGLRenderingContext.prototype.getParameter;
+    WebGLRenderingContext.prototype.getParameter = function(param) {
+        if (param === 37445) return 'Intel Inc.';           // UNMASKED_VENDOR_WEBGL
+        if (param === 37446) return 'Intel Iris OpenGL Engine'; // UNMASKED_RENDERER_WEBGL
+        return getParam.call(this, param);
+    };
+} catch(_) {}
+
+// 10. Remove cdc_ / $cdc_ Playwright driver identifier in DOM
+(function removeCDC() {
+    try {
+        const cdcProp = Object.keys(document).find(k => k.startsWith('cdc_') || k.startsWith('$cdc_'));
+        if (cdcProp) delete document[cdcProp];
+    } catch (_) {}
+})();
+
+// 11. Spoof screen dimensions consistent with a real desktop monitor
+Object.defineProperty(screen, 'width',       { get: () => 1920 });
+Object.defineProperty(screen, 'height',      { get: () => 1080 });
+Object.defineProperty(screen, 'availWidth',  { get: () => 1920 });
+Object.defineProperty(screen, 'availHeight', { get: () => 1040 });
+Object.defineProperty(screen, 'colorDepth',  { get: () => 24 });
+Object.defineProperty(screen, 'pixelDepth',  { get: () => 24 });
+"""
+
 
 class BrowserManager:
     """Manages Playwright browser lifecycle, persistent contexts, and actions."""
@@ -50,7 +160,6 @@ class BrowserManager:
         logger.info("Starting Playwright browser (headless=%s)...", is_headless)
         self._playwright = sync_playwright().start()
 
-        # Launch chromium as standard engine
         self.browser = self._playwright.chromium.launch(
             headless=is_headless,
             args=[
@@ -61,7 +170,6 @@ class BrowserManager:
             ],
         )
 
-        # Standard context configuration
         self.context = self.browser.new_context(
             viewport={"width": 1280, "height": 800},
             user_agent=(
@@ -70,19 +178,17 @@ class BrowserManager:
                 "Chrome/124.0.0.0 Safari/537.36"
             ),
         )
-        # 30 second global timeout default
         self.context.set_default_timeout(30000)
 
     def get_persistent_context(
         self, storage_state_path: str, headless: Optional[bool] = None
     ) -> BrowserContext:
-        """Create or launch a persistent browser context (e.g. for logged-in sessions).
+        """Create or launch a persistent browser context for logged-in sessions.
 
-        Uses the user's real Chrome installation (channel='chrome') to avoid
-        Facebook's anti-automation detection of Playwright's bundled Chromium.
+        Uses the user's real Chrome installation (channel='chrome') + a
+        comprehensive stealth init-script to bypass Facebook's bot detection.
         """
         if self._playwright:
-            # Persistent context cannot be created once browser is already launched
             self.stop()
 
         is_headless = headless if headless is not None else self.settings.browser_headless
@@ -96,20 +202,16 @@ class BrowserManager:
         )
         self._playwright = sync_playwright().start()
 
-        # Persistent contexts store all state (cookies, localStorage, sessions)
-        # directly inside user_data_dir. Do NOT pass storage_state here —
-        # launch_persistent_context does not support that parameter.
         user_data = self.settings.browser_state_dir / "user_data"
         user_data.mkdir(parents=True, exist_ok=True)
 
-        # Use the real Chrome install via channel="chrome" so Facebook sees a
-        # genuine browser fingerprint instead of the stripped-down Chromium
-        # that Playwright ships (which FB actively blocks).
         self.context = self._playwright.chromium.launch_persistent_context(
             user_data_dir=str(user_data),
             channel="chrome",
             headless=is_headless,
-            viewport={"width": 1280, "height": 800},
+            # Mimic a real 1920x1080 desktop — consistent with screen spoofing below
+            viewport={"width": 1920, "height": 1080},
+            screen={"width": 1920, "height": 1080},
             locale="en-US",
             timezone_id="Europe/Prague",
             user_agent=(
@@ -117,6 +219,7 @@ class BrowserManager:
                 "AppleWebKit/537.36 (KHTML, like Gecko) "
                 "Chrome/125.0.0.0 Safari/537.36"
             ),
+            # Critical: strip --enable-automation flag which FB and others check
             ignore_default_args=["--enable-automation"],
             args=[
                 "--disable-blink-features=AutomationControlled",
@@ -124,34 +227,19 @@ class BrowserManager:
                 "--no-sandbox",
                 "--disable-infobars",
                 "--start-maximized",
+                # Suppress the infobar that says "Chrome is being controlled by..."
+                "--disable-notifications",
+                # Avoid the obvious "Headless" string in the user-agent via Chrome internals
+                "--hide-crash-restore-bubble",
             ],
+            # Grant permissions upfront so FB doesn't see a 'denied' Notification permission
+            permissions=["notifications", "geolocation"],
         )
         self.context.set_default_timeout(30000)
 
-        # Inject stealth script on every new page to hide automation markers.
-        # This runs before any page JS and patches the primary signals that
-        # Facebook (and other anti-bot systems) use for detection.
-        self.context.add_init_script("""
-            // Hide navigator.webdriver (primary bot detection signal)
-            Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+        # Inject the full stealth patch-set before any page JS can run
+        self.context.add_init_script(_STEALTH_SCRIPT)
 
-            // Hide the Playwright-injected window properties
-            delete window.__playwright;
-            delete window.__pw_manual;
-
-            // Spoof plugins array (headless Chromium reports 0 plugins)
-            Object.defineProperty(navigator, 'plugins', {
-                get: () => [1, 2, 3, 4, 5],
-            });
-
-            // Spoof languages
-            Object.defineProperty(navigator, 'languages', {
-                get: () => ['en-US', 'en', 'cs'],
-            });
-
-            // Pass Chrome-specific runtime check
-            window.chrome = { runtime: {} };
-        """)
         return self.context
 
     def save_storage_state(self, path: str) -> None:
@@ -201,7 +289,6 @@ class BrowserManager:
     def navigate(self, page: Page, url: str, wait_rules: WaitRules) -> None:
         """Navigate to URL and wait for configured selectors or state."""
         logger.info("Navigating to: %s", url)
-        # Using string representation of load state
         page.goto(url, wait_until=wait_rules.load_state)  # type: ignore
 
         if wait_rules.wait_for_selector:
@@ -219,10 +306,7 @@ class BrowserManager:
 
     @staticmethod
     def extract_text(parent: Any, selector: str) -> Optional[str]:
-        """Safely extract stripped inner text from a element or locator.
-
-        Returns None if element is not found.
-        """
+        """Safely extract stripped inner text from a element or locator."""
         try:
             elem = parent.query_selector(selector)
             if elem:
@@ -234,10 +318,7 @@ class BrowserManager:
 
     @staticmethod
     def extract_attr(parent: Any, selector: str, attr: str) -> Optional[str]:
-        """Safely extract HTML attribute value from a selector.
-
-        Returns None if element or attribute is not found.
-        """
+        """Safely extract HTML attribute value from a selector."""
         try:
             elem = parent.query_selector(selector)
             if elem:
@@ -274,11 +355,23 @@ class BrowserManager:
 
     @staticmethod
     def scroll_n_times(page: Page, n: int, pause_ms: int = 1500) -> None:
-        """Scroll page multiple times to load infinite scrolling elements."""
+        """Scroll page multiple times with human-like jitter to avoid bot patterns."""
         for i in range(n):
             logger.debug("Scroll execution: %d/%d", i + 1, n)
-            page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-            time.sleep(pause_ms / 1000.0)
+            # Scroll in chunks rather than jumping to absolute bottom — looks more human
+            page.evaluate(
+                "window.scrollBy({ top: window.innerHeight * 0.85, behavior: 'smooth' })"
+            )
+            # Randomise pause between scrolls ±30% around the base value
+            jitter = pause_ms * random.uniform(0.7, 1.3)
+            time.sleep(jitter / 1000.0)
+
+    @staticmethod
+    def human_mouse_move(page: Page) -> None:
+        """Move mouse to a random screen position to simulate human presence."""
+        x = random.randint(200, 1600)
+        y = random.randint(200, 900)
+        page.mouse.move(x, y)
 
     @staticmethod
     def polite_delay(min_ms: int = 1000, max_ms: int = 3000) -> None:
@@ -290,6 +383,7 @@ class BrowserManager:
     @staticmethod
     def screenshot_on_error(page: Page, name: str, screenshots_dir: Path) -> None:
         """Capture standard PNG screenshot on scraping failure."""
+        from datetime import datetime
         try:
             screenshots_dir.mkdir(parents=True, exist_ok=True)
             timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
