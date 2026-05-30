@@ -1,0 +1,86 @@
+site_name: "sreality"
+source_type: "normal_listing_site"
+enabled: true
+
+# Search rentals in Prague
+start_urls:
+  - "https://www.sreality.cz/hledani/pronajem/byty/praha"
+
+# Pagination URL template (strana/page parameter)
+search_url_templates:
+  - "https://www.sreality.cz/hledani/pronajem/byty/praha?strana={page}"
+
+allowed_domains:
+  - "sreality.cz"
+
+# Each listing item container
+listing_card_selector: "div.property"
+
+extraction_mode: "hybrid"
+
+detail_page:
+  enabled: true
+  link_selector: "a.title"  # Selector inside card to retrieve detail link
+
+pagination:
+  type: "page_param"
+  max_pages: 5
+  page_param_name: "strana"
+  start_page: 1
+
+wait_rules:
+  load_state: "networkidle"  # Sreality is client-side rendered, wait for network
+  wait_for_selector: "div.property"
+  timeout_ms: 20000
+
+# Selectors on the search cards page
+fields:
+  title:
+    selector: "span.name"
+    attr: "text"
+  price_text:
+    selector: "span.price"
+    attr: "text"
+  image_url:
+    selector: "pre-img img"
+    attr: "src"
+  listing_url:
+    selector: "a.title"
+    attr: "href"
+  location:
+    selector: "span.locality"
+    attr: "text"
+
+# Selectors on the single property page
+detail_fields:
+  description:
+    selector: "div.description"
+    attr: "text"
+  # Fetch parameters block as text to send to Ollama to parse
+  external_id:
+    selector: "span.listing-id, span.id"
+    attr: "text"
+
+transforms:
+  strip_query_params_from_url: true
+  absolutize_urls: true
+  clean_whitespace: true
+
+filters:
+  required_fields:
+    - "title"
+    - "listing_url"
+  exclude_keywords:
+    - "kancelář"
+    - "office"
+
+rate_limit:
+  min_delay_ms: 2000
+  max_delay_ms: 4000
+
+browser:
+  headless: true
+  use_persistent_context: false
+  storage_state_path: ""
+
+notes: "Scrapes Sreality Prague flats. Uses networkidle wait rule to allow React to fetch data."

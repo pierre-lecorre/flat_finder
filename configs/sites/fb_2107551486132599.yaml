@@ -1,0 +1,48 @@
+# ====================================================================================
+# WARNING:
+# Facebook scraping is extremely fragile, brittle, and policy-sensitive.
+# Facebook utilizes anti-scraping protections, dynamic CSS, and detects automated agents.
+# This config uses a persistent context with manual-login session persistence.
+# Run 'python -m app.cli login-facebook' once first to generate your session credentials.
+# ====================================================================================
+
+site_name: "fb_2107551486132599"
+source_type: "facebook_group"
+enabled: true
+
+facebook:
+  group_urls:
+    - "https://www.facebook.com/groups/2107551486132599/"
+  use_manual_login: true
+  scroll_iterations: 15
+  post_selector: "div[role='article']"
+
+extraction_mode: "listing_cards_only"
+
+pagination:
+  type: "none"
+  max_pages: 1
+
+wait_rules:
+  load_state: "domcontentloaded"
+  wait_for_selector: "div[role='feed']"
+  timeout_ms: 30000
+
+browser:
+  headless: false
+  use_persistent_context: true
+  storage_state_path: "data/browser_state/facebook.json"
+
+transforms:
+  strip_query_params_from_url: true
+  absolutize_urls: true
+  clean_whitespace: true
+
+filters:
+  required_fields: []
+  exclude_keywords:
+    - "hladam spolubyvajucu"
+    - "women only"
+    - "girls only"
+
+notes: "Scrapes 'PRAGUE 🇨🇿 - Rent a House, Villa, Apartment, Flat, Condo, Room, Bedspace' (group ID 2107551486132599)."

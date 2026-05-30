@@ -1,0 +1,59 @@
+# Flat Finder — Global Common Configuration
+# Contains LLM options, target Prague currency, and weights for suitability scoring.
+
+# Default city and target currency
+default_city: "Prague"
+default_currency: "CZK"
+
+# Local Ollama connection defaults
+ollama_model: "llama3.1"          # Change to your locally pulled model (e.g. qwen2.5, mistral)
+ollama_timeout: 120
+ollama_temperature: 0.1
+
+# Prague Suitability Scoring Weights
+# The formula calculates flat suitability from 0 to 100 based on these targets.
+scoring:
+  commute_weight: 0.25             # Weight given to district proximity to Palmovka (Praha 8)
+  price_weight: 0.20               # Weight given to price relative to ideal/max boundaries
+  layout_weight: 0.15              # Weight given to layout suitability
+  area_weight: 0.10                # Weight given to total flat size
+  furnished_weight: 0.10           # Weight given to furnished status preference
+  flatshare_quality_weight: 0.10   # Weight given to flatshare quality / private room indicator
+  extras_weight: 0.10              # Weight given to features like balcony, elevator, garage parking
+
+  # Numerical Target values for Prague
+  max_price_czk: 25000.0           # Strict monthly budget boundary (above this score decays)
+  ideal_price_czk: 18000.0         # Ideal target budget (rent + utilities)
+  min_area_m2: 25.0                # Minimum square meters for full flats
+
+  # Layouts we are actively looking for
+  preferred_layouts:
+    - "1+kk"
+    - "1+1"
+    - "2+kk"
+    - "2+1"
+    - "studio"
+    - "room"
+
+  # Commute Proximity Targets: Districts near New Palmovka / The Docks
+  preferred_districts:
+    - "Praha 8"
+    - "Karlín"
+    - "Libeň"
+    - "Palmovka"
+    - "Invalidovna"
+    - "Florenc"
+    - "Praha 7"
+    - "Holešovice"
+    - "Letná"
+    - "Praha 3"
+    - "Žižkov"
+
+  # Immediate exclusion phrases (marks listing as EXCLUDED and scores 0)
+  exclude_keywords:
+    - "only girls"
+    - "women only"
+    - "jen ženy"
+    - "dívky"
+    - "studentky"
+    - "female only"

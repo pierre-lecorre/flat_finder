@@ -1,0 +1,833 @@
+<!DOCTYPE html>
+<html lang="en" class="dark">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Prague Flat Finder — Aggregated Search</title>
+  
+  <!-- Premium Fonts -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800&family=Plus+Jakarta+Sans:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
+  
+  <!-- Tailwind CSS CDN -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <!-- Lucide Icons -->
+  <script src="https://unpkg.com/lucide@latest"></script>
+  
+  <script>
+    tailwind.config = {
+      darkMode: 'class',
+      theme: {
+        extend: {
+          fontFamily: {
+            sans: ['Plus Jakarta Sans', 'Outfit', 'sans-serif'],
+            outfit: ['Outfit', 'sans-serif'],
+          },
+          colors: {
+            brand: {
+              50: '#f0f3ff',
+              100: '#e5e9ff',
+              200: '#cfd7ff',
+              300: '#aab6ff',
+              400: '#7d8eff',
+              500: '#4e5aff',
+              600: '#3438ff',
+              700: '#2626e6',
+              800: '#2020bc',
+              900: '#1e1f96',
+              950: '#0c0c53',
+            },
+            accent: '#00f2fe',
+          }
+        }
+      }
+    }
+  </script>
+
+  <style>
+    /* Premium Backdrop Blurs & Glows */
+    .glass-panel {
+      background: rgba(15, 23, 42, 0.45);
+      backdrop-filter: blur(16px);
+      -webkit-backdrop-filter: blur(16px);
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      box-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.37);
+    }
+    
+    .glass-header {
+      background: rgba(15, 23, 42, 0.65);
+      backdrop-filter: blur(12px);
+      -webkit-backdrop-filter: blur(12px);
+      border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+    }
+
+    .glass-modal {
+      background: rgba(10, 15, 30, 0.85);
+      backdrop-filter: blur(24px);
+      -webkit-backdrop-filter: blur(24px);
+      border: 1px solid rgba(255, 255, 255, 0.12);
+    }
+
+    /* Custom range slider styling */
+    input[type="range"]::-webkit-slider-thumb {
+      -webkit-appearance: none;
+      height: 18px;
+      width: 18px;
+      border-radius: 50%;
+      background: #4e5aff;
+      cursor: pointer;
+      box-shadow: 0 0 10px rgba(78, 90, 255, 0.8);
+      transition: all 0.2s ease;
+    }
+
+    input[type="range"]::-webkit-slider-thumb:hover {
+      transform: scale(1.2);
+    }
+
+    /* Micro animations */
+    .listing-card {
+      transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+    }
+
+    .listing-card:hover {
+      transform: translateY(-6px);
+      box-shadow: 0 12px 30px rgba(78, 90, 255, 0.15);
+      border-color: rgba(78, 90, 255, 0.35);
+    }
+
+    /* Score circular visual */
+    .score-glow-high {
+      box-shadow: 0 0 15px rgba(34, 197, 94, 0.3);
+    }
+    .score-glow-med {
+      box-shadow: 0 0 15px rgba(234, 179, 8, 0.3);
+    }
+    .score-glow-low {
+      box-shadow: 0 0 15px rgba(239, 68, 68, 0.3);
+    }
+
+    ::-webkit-scrollbar {
+      width: 8px;
+      height: 8px;
+    }
+    ::-webkit-scrollbar-track {
+      background: rgba(15, 23, 42, 0.3);
+    }
+    ::-webkit-scrollbar-thumb {
+      background: rgba(255, 255, 255, 0.15);
+      border-radius: 4px;
+    }
+    ::-webkit-scrollbar-thumb:hover {
+      background: rgba(255, 255, 255, 0.3);
+    }
+  </style>
+</head>
+
+<body class="bg-gradient-to-tr from-slate-950 via-slate-900 to-indigo-950 min-h-screen text-slate-100 font-sans selection:bg-brand-500 selection:text-white">
+
+  <!-- Floating background gradients -->
+  <div class="fixed top-0 left-0 w-full h-full pointer-events-none z-[-1] overflow-hidden">
+    <div class="absolute top-[-10%] left-[-10%] w-[50%] h-[50%] rounded-full bg-brand-900/10 blur-[160px]"></div>
+    <div class="absolute bottom-[-10%] right-[-10%] w-[55%] h-[55%] rounded-full bg-indigo-800/10 blur-[180px]"></div>
+  </div>
+
+  <!-- Header -->
+  <header class="glass-header sticky top-0 z-40 w-full px-6 py-4 flex items-center justify-between">
+    <div class="flex items-center space-x-3">
+      <div class="bg-gradient-to-r from-brand-600 to-brand-400 p-2.5 rounded-xl shadow-lg shadow-brand-500/20">
+        <i data-lucide="home" class="w-6 h-6 text-white"></i>
+      </div>
+      <div>
+        <h1 class="text-xl font-bold font-outfit tracking-wide bg-gradient-to-r from-white via-slate-200 to-brand-300 bg-clip-text text-transparent">
+          FLAT FINDER
+        </h1>
+        <p class="text-xs text-slate-400">Prague Multi-Site Real-Estate Aggregator</p>
+      </div>
+    </div>
+    
+    <div class="flex items-center space-x-4">
+      <div id="sources-badge-container" class="flex space-x-2 text-xs">
+        <!-- Site counts dynamically rendered -->
+      </div>
+      
+      <button onclick="exportCSV()" class="flex items-center space-x-2 bg-slate-800/60 hover:bg-brand-600 border border-slate-700 hover:border-brand-500 text-slate-200 hover:text-white px-4 py-2 rounded-xl transition duration-200 text-sm">
+        <i data-lucide="download" class="w-4 h-4"></i>
+        <span>Export CSV</span>
+      </button>
+    </div>
+  </header>
+
+  <!-- Main Body Layout -->
+  <main class="max-w-7xl mx-auto px-6 py-8 grid grid-cols-1 lg:grid-cols-4 gap-8">
+
+    <!-- Filters Sidebar (1 Column) -->
+    <aside class="lg:col-span-1 space-y-6">
+      <div class="glass-panel p-6 rounded-2xl space-y-6">
+        <div class="flex items-center justify-between pb-4 border-b border-slate-800/80">
+          <div class="flex items-center space-x-2 font-outfit font-semibold text-lg">
+            <i data-lucide="sliders-horizontal" class="w-5 h-5 text-brand-400"></i>
+            <span>Aggregated Filters</span>
+          </div>
+          <button onclick="resetFilters()" class="text-xs text-slate-400 hover:text-brand-400 transition">Reset</button>
+        </div>
+
+        <!-- Live Search -->
+        <div class="space-y-2">
+          <label class="text-xs font-semibold text-slate-400 uppercase tracking-wider block">Live Keyword Search</label>
+          <div class="relative">
+            <i data-lucide="search" class="absolute left-3 top-3 w-4 h-4 text-slate-500"></i>
+            <input type="text" id="filter-search" oninput="debounceFetch()" placeholder="Search title, district..." class="w-full bg-slate-900/60 border border-slate-700/80 rounded-xl py-2 pl-9 pr-4 text-sm text-slate-100 placeholder-slate-500 focus:outline-none focus:border-brand-500 focus:ring-1 focus:ring-brand-500 transition duration-200">
+          </div>
+        </div>
+
+        <!-- District Filter -->
+        <div class="space-y-2">
+          <label class="text-xs font-semibold text-slate-400 uppercase tracking-wider block">Target Prague District</label>
+          <select id="filter-district" onchange="fetchListings()" class="w-full bg-slate-900/60 border border-slate-700/80 rounded-xl py-2.5 px-3 text-sm text-slate-100 focus:outline-none focus:border-brand-500 transition duration-200 cursor-pointer">
+            <option value="">All Prague Districts</option>
+            <option value="Praha 8">Praha 8 (Palmovka / Karlín / Libeň)</option>
+            <option value="Praha 7">Praha 7 (Holešovice / Letná)</option>
+            <option value="Praha 3">Praha 3 (Žižkov / Vinohrady)</option>
+            <option value="Praha 1">Praha 1 (Old Town / Center)</option>
+            <option value="Praha 2">Praha 2 (Vinohrady / Vyšehrad)</option>
+            <option value="Praha 10">Praha 10 (Vršovice / Strašnice)</option>
+          </select>
+        </div>
+
+        <!-- Sources Filter -->
+        <div class="space-y-2">
+          <label class="text-xs font-semibold text-slate-400 uppercase tracking-wider block">Source Website</label>
+          <select id="filter-source" onchange="fetchListings()" class="w-full bg-slate-900/60 border border-slate-700/80 rounded-xl py-2.5 px-3 text-sm text-slate-100 focus:outline-none focus:border-brand-500 transition duration-200 cursor-pointer">
+            <option value="">All Websites</option>
+            <!-- Sites list dynamically injected -->
+          </select>
+        </div>
+
+        <!-- Price Range Slider -->
+        <div class="space-y-2">
+          <div class="flex items-center justify-between text-xs font-semibold text-slate-400 uppercase tracking-wider">
+            <span>Max Budget (Rent + Fees)</span>
+            <span id="price-display" class="text-brand-300 font-bold text-sm tracking-normal">25 000 CZK</span>
+          </div>
+          <input type="range" id="filter-price" min="5000" max="45000" step="1000" value="25000" oninput="updatePriceLabel(this.value)" class="w-full bg-slate-800 rounded-lg appearance-none h-1.5 cursor-pointer">
+          <div class="flex justify-between text-[10px] text-slate-500 font-bold">
+            <span>5K CZK</span>
+            <span>45K CZK</span>
+          </div>
+        </div>
+
+        <!-- Min Area Slider -->
+        <div class="space-y-2">
+          <div class="flex items-center justify-between text-xs font-semibold text-slate-400 uppercase tracking-wider">
+            <span>Min Flat Area</span>
+            <span id="area-display" class="text-brand-300 font-bold text-sm tracking-normal">25 m²</span>
+          </div>
+          <input type="range" id="filter-area" min="15" max="100" step="5" value="25" oninput="updateAreaLabel(this.value)" class="w-full bg-slate-800 rounded-lg appearance-none h-1.5 cursor-pointer">
+          <div class="flex justify-between text-[10px] text-slate-500 font-bold">
+            <span>15 m²</span>
+            <span>100 m²</span>
+          </div>
+        </div>
+
+        <!-- Housing Type Toggles -->
+        <div class="space-y-3">
+          <label class="text-xs font-semibold text-slate-400 uppercase tracking-wider block">Housing Context</label>
+          
+          <div class="grid grid-cols-2 gap-2 text-sm">
+            <button id="toggle-flatshare-all" onclick="setFlatshareFilter(null)" class="py-2 px-3 bg-brand-500 border border-brand-500 text-white rounded-xl text-center font-semibold hover:bg-brand-600 transition">
+              Any Context
+            </button>
+            <button id="toggle-flatshare-only" onclick="setFlatshareFilter(true)" class="py-2 px-3 bg-slate-900/60 border border-slate-700/80 hover:border-brand-500 rounded-xl text-center text-slate-300 hover:text-white transition">
+              Flatshare Only
+            </button>
+          </div>
+        </div>
+
+        <!-- Boolean Amenities Checklist -->
+        <div class="space-y-3 pt-4 border-t border-slate-800/80">
+          <label class="text-xs font-semibold text-slate-400 uppercase tracking-wider block">Amenities (Deterministic)</label>
+          
+          <div class="space-y-2 text-sm text-slate-300">
+            <label class="flex items-center space-x-3 cursor-pointer hover:text-white">
+              <input type="checkbox" id="chk-balcony" onchange="fetchListings()" class="rounded bg-slate-900 border-slate-700 text-brand-500 focus:ring-brand-500 focus:ring-offset-slate-950 w-4.5 h-4.5">
+              <span>Balcony / Terrace</span>
+            </label>
+            <label class="flex items-center space-x-3 cursor-pointer hover:text-white">
+              <input type="checkbox" id="chk-elevator" onchange="fetchListings()" class="rounded bg-slate-900 border-slate-700 text-brand-500 focus:ring-brand-500 w-4.5 h-4.5">
+              <span>Elevator Access</span>
+            </label>
+            <label class="flex items-center space-x-3 cursor-pointer hover:text-white">
+              <input type="checkbox" id="chk-parking" onchange="fetchListings()" class="rounded bg-slate-900 border-slate-700 text-brand-500 focus:ring-brand-500 w-4.5 h-4.5">
+              <span>Garáž / Parking</span>
+            </label>
+            <label class="flex items-center space-x-3 cursor-pointer hover:text-white">
+              <input type="checkbox" id="chk-pets" onchange="fetchListings()" class="rounded bg-slate-900 border-slate-700 text-brand-500 focus:ring-brand-500 w-4.5 h-4.5">
+              <span>Pets Allowed</span>
+            </label>
+          </div>
+        </div>
+
+      </div>
+    </aside>
+
+    <!-- Results Panel (3 Columns) -->
+    <section class="lg:col-span-3 space-y-6">
+      
+      <!-- List control bar -->
+      <div class="flex items-center justify-between glass-panel px-6 py-3 rounded-2xl text-sm">
+        <span class="text-slate-400 font-semibold">
+          Showing <span id="listings-count" class="text-white font-bold">0</span> matched listings
+        </span>
+        
+        <div class="flex items-center space-x-3">
+          <label class="text-slate-400 text-xs font-semibold uppercase tracking-wider">Sort By</label>
+          <select id="filter-sort" onchange="fetchListings()" class="bg-slate-900/60 border border-slate-700/80 rounded-xl px-3 py-1.5 text-xs text-slate-100 focus:outline-none focus:border-brand-500 cursor-pointer">
+            <option value="score_desc">Suitability Score</option>
+            <option value="price_asc">Price: Low to High</option>
+            <option value="price_desc">Price: High to Low</option>
+            <option value="area_desc">Area Size</option>
+            <option value="date_desc">Newly Scraped</option>
+          </select>
+        </div>
+      </div>
+
+      <!-- Listings Grid -->
+      <div id="listings-grid" class="grid grid-cols-1 md:grid-cols-2 gap-6">
+        <!-- Listing Cards Dynamically Injected -->
+      </div>
+      
+      <!-- Empty state -->
+      <div id="empty-state" class="hidden text-center py-16 glass-panel rounded-2xl space-y-4">
+        <div class="bg-slate-900/80 p-4 rounded-full w-16 h-16 flex items-center justify-center mx-auto text-slate-500">
+          <i data-lucide="info" class="w-8 h-8"></i>
+        </div>
+        <div>
+          <h3 class="font-bold text-lg font-outfit">No Listings Found</h3>
+          <p class="text-sm text-slate-400 max-w-md mx-auto mt-1">Try resetting your budget slider, modifying filters, or running a scraping pass to log new results.</p>
+        </div>
+      </div>
+
+    </section>
+
+  </main>
+
+  <!-- Listing Detail Glass Modal Popup -->
+  <div id="detail-modal" class="fixed inset-0 z-50 overflow-y-auto hidden">
+    <div class="flex items-center justify-center min-h-screen px-4 py-12">
+      
+      <!-- Overlay blur back -->
+      <div onclick="closeModal()" class="fixed inset-0 bg-slate-950/80 backdrop-blur-md transition-opacity"></div>
+      
+      <!-- Modal box -->
+      <div class="glass-modal max-w-3xl w-full rounded-3xl relative z-10 overflow-hidden shadow-2xl transition-all duration-300 transform scale-100">
+        
+        <!-- Modal header/title -->
+        <div class="relative h-64 bg-slate-900 overflow-hidden">
+          <img id="modal-image" src="" alt="Listing photo" class="w-full h-full object-cover">
+          <div class="absolute inset-0 bg-gradient-to-t from-slate-950 via-slate-950/40 to-transparent"></div>
+          
+          <button onclick="closeModal()" class="absolute top-4 right-4 bg-slate-900/80 hover:bg-slate-800 border border-slate-700/60 p-2 rounded-full text-slate-300 hover:text-white transition shadow-lg">
+            <i data-lucide="x" class="w-5 h-5"></i>
+          </button>
+          
+          <div class="absolute bottom-6 left-6 right-6">
+            <div class="flex space-x-2 mb-2">
+              <span id="modal-site-tag" class="bg-brand-500/90 text-white font-bold text-[10px] px-2 py-0.5 rounded-md uppercase tracking-wider"></span>
+              <span id="modal-layout-tag" class="bg-indigo-500/90 text-white font-bold text-[10px] px-2 py-0.5 rounded-md uppercase tracking-wider"></span>
+            </div>
+            <h2 id="modal-title" class="text-xl md:text-2xl font-bold font-outfit text-white"></h2>
+          </div>
+        </div>
+
+        <!-- Modal contents -->
+        <div class="p-6 md:p-8 space-y-6">
+          
+          <!-- Key details metrics panel -->
+          <div class="grid grid-cols-2 md:grid-cols-4 gap-4 p-4 bg-slate-950/50 rounded-2xl border border-slate-800/80 text-sm">
+            <div class="space-y-0.5">
+              <span class="text-xs text-slate-400 block font-semibold">Total Monthly Cost</span>
+              <strong id="modal-price" class="text-brand-300 text-lg md:text-xl font-bold tracking-tight"></strong>
+            </div>
+            <div class="space-y-0.5">
+              <span class="text-xs text-slate-400 block font-semibold">Area / Layout</span>
+              <strong id="modal-area" class="text-slate-100 text-lg md:text-xl font-bold"></strong>
+            </div>
+            <div class="space-y-0.5">
+              <span class="text-xs text-slate-400 block font-semibold">Commute Friendliness</span>
+              <strong id="modal-commute-score" class="text-accent text-lg md:text-xl font-bold font-outfit"></strong>
+            </div>
+            <div class="space-y-0.5">
+              <span class="text-xs text-slate-400 block font-semibold">Suitability Score</span>
+              <div class="flex items-center space-x-1.5 mt-0.5">
+                <div id="modal-score-indicator" class="w-3.5 h-3.5 rounded-full"></div>
+                <strong id="modal-score" class="text-slate-100 text-lg md:text-xl font-bold"></strong>
+              </div>
+            </div>
+          </div>
+
+          <!-- Commute Tag Details -->
+          <div id="modal-commute-banner" class="p-4 bg-emerald-500/10 border border-emerald-500/25 rounded-2xl flex items-start space-x-3 text-sm text-emerald-300">
+            <i data-lucide="navigation" class="w-5 h-5 mt-0.5 flex-shrink-0 text-emerald-400"></i>
+            <div>
+              <strong class="block font-bold">Prague Commute Analysis (New Palmovka / The Docks):</strong>
+              <span id="modal-commute-note"></span>
+            </div>
+          </div>
+
+          <!-- Details Grid lists -->
+          <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+            <div class="space-y-4">
+              <h3 class="font-bold font-outfit text-slate-200 border-b border-slate-800 pb-2">Housing Parameters</h3>
+              <ul class="space-y-2 text-sm text-slate-300">
+                <li class="flex justify-between"><span class="text-slate-500">Rent Price:</span> <span id="modal-param-rent"></span></li>
+                <li class="flex justify-between"><span class="text-slate-500">Utility Fees:</span> <span id="modal-param-fees"></span></li>
+                <li class="flex justify-between"><span class="text-slate-500">Deposit:</span> <span id="modal-param-deposit"></span></li>
+                <li class="flex justify-between"><span class="text-slate-500">Furnished Status:</span> <span id="modal-param-furnished" class="capitalize"></span></li>
+                <li class="flex justify-between"><span class="text-slate-500">Agency / Owner:</span> <span id="modal-param-seller" class="capitalize"></span></li>
+              </ul>
+            </div>
+            
+            <div class="space-y-4">
+              <h3 class="font-bold font-outfit text-slate-200 border-b border-slate-800 pb-2">Amenities Details</h3>
+              <div class="grid grid-cols-2 gap-3 text-sm">
+                <div id="modal-amenity-balcony" class="flex items-center space-x-2 p-2 bg-slate-900/60 rounded-xl border border-slate-800/80">
+                  <i data-lucide="check" class="w-4 h-4 text-emerald-400"></i>
+                  <span>Balcony/Terrace</span>
+                </div>
+                <div id="modal-amenity-elevator" class="flex items-center space-x-2 p-2 bg-slate-900/60 rounded-xl border border-slate-800/80">
+                  <i data-lucide="check" class="w-4 h-4 text-emerald-400"></i>
+                  <span>Elevator</span>
+                </div>
+                <div id="modal-amenity-parking" class="flex items-center space-x-2 p-2 bg-slate-900/60 rounded-xl border border-slate-800/80">
+                  <i data-lucide="check" class="w-4 h-4 text-emerald-400"></i>
+                  <span>Garáž / Parking</span>
+                </div>
+                <div id="modal-amenity-pets" class="flex items-center space-x-2 p-2 bg-slate-900/60 rounded-xl border border-slate-800/80">
+                  <i data-lucide="check" class="w-4 h-4 text-emerald-400"></i>
+                  <span>Pets Allowed</span>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Description -->
+          <div class="space-y-2">
+            <h3 class="font-bold font-outfit text-slate-200 border-b border-slate-800 pb-2">Listing Description</h3>
+            <p id="modal-desc" class="text-sm text-slate-300 leading-relaxed whitespace-pre-wrap max-h-48 overflow-y-auto pr-2 bg-slate-950/20 p-3 rounded-xl border border-slate-800/50"></p>
+          </div>
+
+          <!-- Dynamic image gallery (if multiple photos available) -->
+          <div id="modal-gallery-container" class="space-y-2 hidden">
+            <h3 class="font-bold font-outfit text-slate-200 pb-1">Additional Photos</h3>
+            <div id="modal-gallery" class="flex space-x-3 overflow-x-auto pb-2">
+              <!-- Thumbnail lists dynamically injected -->
+            </div>
+          </div>
+
+          <!-- Actions -->
+          <div class="flex items-center justify-between pt-6 border-t border-slate-800/80">
+            <button id="modal-exclude-btn" onclick="" class="bg-red-500/10 hover:bg-red-600 border border-red-500/20 hover:border-red-500 text-red-400 hover:text-white font-semibold text-sm px-4 py-2 rounded-xl transition duration-200 flex items-center space-x-2">
+              <i data-lucide="trash-2" class="w-4 h-4"></i>
+              <span>Exclude & Hide Listing</span>
+            </button>
+            
+            <a id="modal-visit-btn" href="" target="_blank" class="bg-brand-500 hover:bg-brand-600 text-white font-bold text-sm px-6 py-2.5 rounded-xl transition duration-200 shadow-lg shadow-brand-500/25 flex items-center space-x-2">
+              <span>Visit Original Website</span>
+              <i data-lucide="external-link" class="w-4 h-4"></i>
+            </a>
+          </div>
+
+        </div>
+
+      </div>
+    </div>
+  </div>
+
+  <!-- Script logics -->
+  <script>
+    let debounceTimer;
+    let flatshareFilter = null;
+    let cachedListings = [];
+
+    // Initialize application
+    document.addEventListener("DOMContentLoaded", () => {
+      fetchSources();
+      fetchListings();
+    });
+
+    function fetchSources() {
+      fetch("/api/sources")
+        .then(res => res.json())
+        .then(sources => {
+          const badgeContainer = document.getElementById("sources-badge-container");
+          const filterSource = document.getElementById("filter-source");
+          
+          badgeContainer.innerHTML = '';
+          
+          sources.forEach(src => {
+            // Render Badge in Header
+            const badge = document.createElement("div");
+            badge.className = "bg-slate-800/80 border border-slate-700 px-3 py-1 rounded-full flex items-center space-x-1.5";
+            badge.innerHTML = `
+              <span class="w-1.5 h-1.5 rounded-full ${src.active_count > 0 ? 'bg-brand-400' : 'bg-slate-600'}"></span>
+              <span class="text-slate-300 font-bold uppercase tracking-wider text-[10px]">${src.site_name}</span>
+              <span class="text-[9px] text-slate-500">(${src.active_count})</span>
+            `;
+            badgeContainer.appendChild(badge);
+
+            // Populate Filter Select Option
+            const opt = document.createElement("option");
+            opt.value = src.site_name;
+            opt.textContent = `${src.site_name} (${src.active_count})`;
+            filterSource.appendChild(opt);
+          });
+          
+          lucide.createIcons();
+        });
+    }
+
+    function fetchListings() {
+      // Collect filter values
+      const query = document.getElementById("filter-search").value;
+      const district = document.getElementById("filter-district").value;
+      const siteName = document.getElementById("filter-source").value;
+      const maxPrice = document.getElementById("filter-price").value;
+      const minArea = document.getElementById("filter-area").value;
+      
+      const balcony = document.getElementById("chk-balcony").checked ? true : null;
+      const elevator = document.getElementById("chk-elevator").checked ? true : null;
+      const parking = document.getElementById("chk-parking").checked ? true : null;
+      const pets = document.getElementById("chk-pets").checked ? true : null;
+      
+      const sortBy = document.getElementById("filter-sort").value;
+
+      // Build url endpoints
+      let url = `/api/listings?sort_by=${sortBy}&exclude_inactive=true`;
+      if (query) url += `&q=${encodeURIComponent(query)}`;
+      if (district) url += `&district=${encodeURIComponent(district)}`;
+      if (siteName) url += `&site_name=${encodeURIComponent(siteName)}`;
+      if (maxPrice) url += `&max_price=${maxPrice}`;
+      if (minArea) url += `&min_area=${minArea}`;
+      
+      if (flatshareFilter !== null) url += `&flatshare=${flatshareFilter}`;
+      if (balcony) url += `&balcony=true`;
+      if (elevator) url += `&elevator=true`;
+      if (parking) url += `&parking=true`;
+      if (pets) url += `&pets=true`;
+
+      fetch(url)
+        .then(res => res.json())
+        .then(listings => {
+          cachedListings = listings;
+          renderListings(listings);
+        });
+    }
+
+    function renderListings(listings) {
+      const grid = document.getElementById("listings-grid");
+      const emptyState = document.getElementById("empty-state");
+      document.getElementById("listings-count").textContent = listings.length;
+
+      grid.innerHTML = '';
+
+      if (listings.length === 0) {
+        grid.classList.add("hidden");
+        emptyState.classList.remove("hidden");
+        return;
+      }
+
+      grid.classList.remove("hidden");
+      emptyState.classList.add("hidden");
+
+      listings.forEach(item => {
+        const card = document.createElement("div");
+        card.className = "listing-card glass-panel rounded-2xl overflow-hidden flex flex-col cursor-pointer";
+        card.onclick = () => openModal(item);
+
+        // Price formatting
+        const priceVal = item.total_monthly_value || item.price_value;
+        const priceText = priceVal ? `${priceVal.toLocaleString()} ${item.currency || 'CZK'}` : (item.raw_price_text || 'Rent unknown');
+        
+        // Image resolve (prefer local downloaded files)
+        let mainImg = "/images/placeholder.jpg";
+        if (item.downloaded_images && item.downloaded_images.length > 0) {
+          const primaryImg = item.downloaded_images.find(img => img.is_primary) || item.downloaded_images[0];
+          mainImg = `/${primaryImg.local_path.replace(/\\/g, '/')}`;
+        } else if (item.raw_image_url) {
+          mainImg = item.raw_image_url;
+        }
+
+        // Score colors indicators
+        let scoreColorClass = "bg-red-500/20 text-red-400 border-red-500/30 score-glow-low";
+        if (item.suitability_score >= 70) {
+          scoreColorClass = "bg-emerald-500/20 text-emerald-400 border-emerald-500/30 score-glow-high";
+        } else if (item.suitability_score >= 40) {
+          scoreColorClass = "bg-yellow-500/20 text-yellow-400 border-yellow-500/30 score-glow-med";
+        }
+
+        card.innerHTML = `
+          <div class="relative h-48 bg-slate-900">
+            <img src="${mainImg}" alt="Listing cover" class="w-full h-full object-cover">
+            <div class="absolute inset-0 bg-gradient-to-t from-slate-950/80 via-transparent to-transparent"></div>
+            
+            <!-- Site tags -->
+            <span class="absolute top-3 left-3 bg-slate-950/70 border border-slate-700 text-[9px] font-bold text-slate-300 px-2 py-0.5 rounded uppercase tracking-wider">
+              ${item.site_name}
+            </span>
+
+            <!-- Suitability Score Badge -->
+            <div class="absolute top-3 right-3 border px-2.5 py-1 rounded-xl text-xs font-black flex items-center space-x-1 ${scoreColorClass}">
+              <i data-lucide="zap" class="w-3.5 h-3.5 fill-current"></i>
+              <span>Score ${item.suitability_score}</span>
+            </div>
+            
+            <div class="absolute bottom-3 left-4 flex space-x-1.5 text-[10px] font-bold">
+              ${item.layout ? `<span class="bg-brand-500/90 text-white px-2 py-0.5 rounded uppercase">${item.layout}</span>` : ''}
+              ${item.area_m2 ? `<span class="bg-indigo-500/90 text-white px-2 py-0.5 rounded">${item.area_m2} m²</span>` : ''}
+            </div>
+          </div>
+
+          <div class="p-5 flex-1 flex flex-col justify-between space-y-4">
+            <div class="space-y-1">
+              <h3 class="font-bold text-base md:text-lg font-outfit text-slate-100 line-clamp-1 hover:text-white transition">
+                ${item.raw_title || 'Aggregated Listing'}
+              </h3>
+              <p class="text-xs text-slate-400 flex items-center">
+                <i data-lucide="map-pin" class="w-3.5 h-3.5 mr-1 text-slate-500"></i>
+                <span class="truncate">${item.district || item.raw_location_text || 'Prague'}</span>
+              </p>
+            </div>
+
+            <div class="flex items-center justify-between pt-3 border-t border-slate-800/80">
+              <div class="space-y-0.5">
+                <span class="text-[10px] uppercase font-bold text-slate-500 tracking-wider">Total Rent</span>
+                <p class="font-extrabold text-base text-brand-300 font-outfit">${priceText}</p>
+              </div>
+              
+              <span class="text-xs text-brand-400 hover:text-brand-300 font-semibold flex items-center space-x-1">
+                <span>Quick View</span>
+                <i data-lucide="chevron-right" class="w-3.5 h-3.5"></i>
+              </span>
+            </div>
+          </div>
+        `;
+        
+        grid.appendChild(card);
+      });
+
+      lucide.createIcons();
+    }
+
+    function openModal(item) {
+      const modal = document.getElementById("detail-modal");
+      modal.classList.remove("hidden");
+      document.body.classList.add("overflow-hidden");
+
+      // Title & Tags
+      document.getElementById("modal-title").textContent = item.raw_title || 'Prague aggregated ad';
+      document.getElementById("modal-site-tag").textContent = item.site_name;
+      document.getElementById("modal-layout-tag").textContent = item.layout || 'Unknown layout';
+
+      // Cover Image
+      let mainImg = "/images/placeholder.jpg";
+      if (item.downloaded_images && item.downloaded_images.length > 0) {
+        const primaryImg = item.downloaded_images.find(img => img.is_primary) || item.downloaded_images[0];
+        mainImg = `/${primaryImg.local_path.replace(/\\/g, '/')}`;
+      } else if (item.raw_image_url) {
+        mainImg = item.raw_image_url;
+      }
+      document.getElementById("modal-image").src = mainImg;
+
+      // Price Formatting
+      const priceVal = item.total_monthly_value || item.price_value;
+      document.getElementById("modal-price").textContent = priceVal ? `${priceVal.toLocaleString()} CZK/mo` : 'Unknown';
+      document.getElementById("modal-param-rent").textContent = item.price_value ? `${item.price_value.toLocaleString()} CZK` : 'Unknown';
+      document.getElementById("modal-param-fees").textContent = item.fees_value ? `${item.fees_value.toLocaleString()} CZK` : 'Included or omitted';
+      document.getElementById("modal-param-deposit").textContent = item.deposit_value ? `${item.deposit_value.toLocaleString()} CZK` : 'Not specified';
+      
+      // Area / Layout
+      document.getElementById("modal-area").textContent = `${item.layout || 'Layout unknown'} (${item.area_m2 ? item.area_m2 + ' m²' : 'No size info'})`;
+
+      // Commute details
+      document.getElementById("modal-commute-score").textContent = item.district || 'Prague';
+      document.getElementById("modal-commute-note").textContent = item.commute_note || 'Proximity details unknown.';
+
+      // Scores
+      document.getElementById("modal-score").textContent = `${item.suitability_score} / 100`;
+      const scoreIndicator = document.getElementById("modal-score-indicator");
+      scoreIndicator.className = "w-3.5 h-3.5 rounded-full";
+      if (item.suitability_score >= 70) scoreIndicator.classList.add("bg-emerald-500");
+      else if (item.suitability_score >= 40) scoreIndicator.classList.add("bg-yellow-500");
+      else scoreIndicator.classList.add("bg-red-500");
+
+      // Parameters list
+      document.getElementById("modal-param-furnished").textContent = item.furnished_status || 'unknown';
+      document.getElementById("modal-param-seller").textContent = item.owner_or_agency || 'unknown';
+
+      // Description text
+      document.getElementById("modal-desc").textContent = item.raw_description || 'No description available.';
+
+      // Amenities icons updates
+      toggleAmenityIcon("modal-amenity-balcony", item.balcony);
+      toggleAmenityIcon("modal-amenity-elevator", item.elevator);
+      toggleAmenityIcon("modal-amenity-parking", item.parking);
+      toggleAmenityIcon("modal-amenity-pets", item.pets_allowed);
+
+      // visit original button
+      document.getElementById("modal-visit-btn").href = item.listing_url || item.canonical_url;
+
+      // exclude listing action hookup
+      const excludeBtn = document.getElementById("modal-exclude-btn");
+      excludeBtn.onclick = () => triggerExcludeListing(item.id);
+
+      // Gallery loop
+      const galleryContainer = document.getElementById("modal-gallery-container");
+      const gallery = document.getElementById("modal-gallery");
+      gallery.innerHTML = '';
+      
+      if (item.downloaded_images && item.downloaded_images.length > 1) {
+        galleryContainer.classList.remove("hidden");
+        item.downloaded_images.forEach(img => {
+          const imgUrl = `/${img.local_path.replace(/\\/g, '/')}`;
+          const thumb = document.createElement("img");
+          thumb.src = imgUrl;
+          thumb.className = "w-20 h-16 object-cover rounded-lg border border-slate-700/60 cursor-pointer hover:border-brand-500 transition duration-150 flex-shrink-0";
+          thumb.onclick = () => { document.getElementById("modal-image").src = imgUrl; };
+          gallery.appendChild(thumb);
+        });
+      } else {
+        galleryContainer.classList.add("hidden");
+      }
+
+      lucide.createIcons();
+    }
+
+    function toggleAmenityIcon(elementId, flag) {
+      const elem = document.getElementById(elementId);
+      const icon = elem.querySelector("i");
+      const label = elem.querySelector("span");
+      
+      if (flag === true) {
+        elem.className = "flex items-center space-x-2 p-2 bg-emerald-500/10 rounded-xl border border-emerald-500/20 text-emerald-300";
+        icon.setAttribute("data-lucide", "check");
+      } else if (flag === False || flag === false) {
+        elem.className = "flex items-center space-x-2 p-2 bg-red-500/10 rounded-xl border border-red-500/20 text-red-400";
+        icon.setAttribute("data-lucide", "x");
+      } else {
+        elem.className = "flex items-center space-x-2 p-2 bg-slate-900/60 rounded-xl border border-slate-800/80 text-slate-500";
+        icon.setAttribute("data-lucide", "help-circle");
+      }
+    }
+
+    function closeModal() {
+      document.getElementById("detail-modal").classList.add("hidden");
+      document.body.classList.remove("overflow-hidden");
+    }
+
+    function triggerExcludeListing(enrichedId) {
+      if (!confirm("Are you sure you want to exclude and hide this listing permanently?")) return;
+
+      fetch(`/api/listings/${enrichedId}/exclude`, { method: "POST" })
+        .then(res => res.json())
+        .then(data => {
+          closeModal();
+          // Reload lists
+          fetchListings();
+        });
+    }
+
+    function setFlatshareFilter(val) {
+      flatshareFilter = val;
+      
+      // Update styling
+      const btnAll = document.getElementById("toggle-flatshare-all");
+      const btnOnly = document.getElementById("toggle-flatshare-only");
+
+      if (val === null) {
+        btnAll.className = "py-2 px-3 bg-brand-500 border border-brand-500 text-white rounded-xl text-center font-semibold transition";
+        btnOnly.className = "py-2 px-3 bg-slate-900/60 border border-slate-700/80 hover:border-brand-500 rounded-xl text-center text-slate-300 hover:text-white transition";
+      } else {
+        btnOnly.className = "py-2 px-3 bg-brand-500 border border-brand-500 text-white rounded-xl text-center font-semibold transition";
+        btnAll.className = "py-2 px-3 bg-slate-900/60 border border-slate-700/80 hover:border-brand-500 rounded-xl text-center text-slate-300 hover:text-white transition";
+      }
+
+      fetchListings();
+    }
+
+    function updatePriceLabel(val) {
+      document.getElementById("price-display").textContent = `${Number(val).toLocaleString()} CZK`;
+      debounceFetch();
+    }
+
+    function updateAreaLabel(val) {
+      document.getElementById("area-display").textContent = `${val} m²`;
+      debounceFetch();
+    }
+
+    function debounceFetch() {
+      clearTimeout(debounceTimer);
+      debounceTimer = setTimeout(() => {
+        fetchListings();
+      }, 350);
+    }
+
+    function resetFilters() {
+      document.getElementById("filter-search").value = '';
+      document.getElementById("filter-district").value = '';
+      document.getElementById("filter-source").value = '';
+      
+      document.getElementById("filter-price").value = 25000;
+      document.getElementById("price-display").textContent = "25 000 CZK";
+      
+      document.getElementById("filter-area").value = 25;
+      document.getElementById("area-display").textContent = "25 m²";
+      
+      document.getElementById("chk-balcony").checked = false;
+      document.getElementById("chk-elevator").checked = false;
+      document.getElementById("chk-parking").checked = false;
+      document.getElementById("chk-pets").checked = false;
+      
+      flatshareFilter = null;
+      setFlatshareFilter(null);
+    }
+
+    function exportCSV() {
+      // Build dynamic URL matching filters to download matching data
+      const query = document.getElementById("filter-search").value;
+      const siteName = document.getElementById("filter-source").value;
+      
+      let url = "/api/listings"; // Standard retrieve
+      fetch(url)
+        .then(res => res.json())
+        .then(listings => {
+          if (listings.length === 0) {
+            alert("No data available to export.");
+            return;
+          }
+
+          // Build CSV dynamically in client
+          const headers = Object.keys(listings[0]).join(",");
+          const rows = listings.map(item => {
+            return Object.values(item).map(val => {
+              if (typeof val === 'string') {
+                return `"${val.replace(/"/g, '""')}"`;
+              }
+              if (val === null) return '';
+              return val;
+            }).join(",");
+          });
+
+          const csvContent = "data:text/csv;charset=utf-8," + [headers, ...rows].join("\n");
+          const encodedUri = encodeURI(csvContent);
+          const link = document.createElement("a");
+          link.setAttribute("href", encodedUri);
+          link.setAttribute("download", "flat_finder_export.csv");
+          document.body.appendChild(link);
+          link.click();
+          document.body.removeChild(link);
+        });
+    }
+  </script>
+</body>
+</html>

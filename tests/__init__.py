@@ -1,0 +1,1 @@
+"""Flat Finder test suite."""

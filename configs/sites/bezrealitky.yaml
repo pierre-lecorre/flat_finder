@@ -1,0 +1,82 @@
+site_name: "bezrealitky"
+source_type: "normal_listing_site"
+enabled: true
+
+# Search rentals in Prague
+start_urls:
+  - "https://www.bezrealitky.cz/vyhledat?advyhledat=1&nabidka=pronajem&typNemovitosti=byt&lokalita=praha"
+
+search_url_templates:
+  - "https://www.bezrealitky.cz/vyhledat?advyhledat=1&nabidka=pronajem&typNemovitosti=byt&lokalita=praha&page={page}"
+
+allowed_domains:
+  - "bezrealitky.cz"
+
+# Listing item card container
+listing_card_selector: "article.card, div.card"
+
+extraction_mode: "hybrid"
+
+detail_page:
+  enabled: true
+  link_selector: "a.card__title-link, a.card__link"
+
+pagination:
+  type: "page_param"
+  max_pages: 5
+  page_param_name: "page"
+  start_page: 1
+
+wait_rules:
+  load_state: "domcontentloaded"
+  wait_for_selector: "article.card"
+  timeout_ms: 15000
+
+# Selectors on the search cards page
+fields:
+  title:
+    selector: "h2.card__title, .card__title"
+    attr: "text"
+  price_text:
+    selector: "span.card__price, .card__price"
+    attr: "text"
+  image_url:
+    selector: "figure.card__img img, img.card__img"
+    attr: "src"
+  listing_url:
+    selector: "a.card__title-link, a.card__link"
+    attr: "href"
+  location:
+    selector: "span.card__location, .card__location"
+    attr: "text"
+
+# Selectors on the detail page
+detail_fields:
+  description:
+    selector: "div.description, div.b-description"
+    attr: "text"
+  external_id:
+    selector: "span.listing-id, .listing-id"
+    attr: "text"
+
+transforms:
+  strip_query_params_from_url: true
+  absolutize_urls: true
+  clean_whitespace: true
+
+filters:
+  required_fields:
+    - "title"
+    - "listing_url"
+  exclude_keywords: []
+
+rate_limit:
+  min_delay_ms: 1500
+  max_delay_ms: 3000
+
+browser:
+  headless: true
+  use_persistent_context: false
+  storage_state_path: ""
+
+notes: "Scrapes Bezrealitky Prague flats. Uses hybrid mode to fetch description text."
