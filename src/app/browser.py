@@ -27,16 +27,16 @@ logger = get_logger("app.browser")
 # ---------------------------------------------------------------------------
 # Full stealth init script — injected before ANY page JS executes.
 #
-# Key insight for the META white page:
-#   Facebook reads window.outerWidth / window.outerHeight on load.
-#   Playwright sets viewport correctly but does NOT set outerWidth/outerHeight —
-#   they stay at whatever the OS window reports, which is often a small or
-#   inconsistent value. FB sees a mismatch between screen (1920x1080) and
-#   outerWidth (e.g. 800) and triggers the bot checkpoint.
-#   Fix: spoof outerWidth/outerHeight to match the viewport we configured.
+# IMPORTANT: Do NOT use viewport=None in launch_persistent_context.
+# That combination triggers a known Playwright bug where page.goto() hangs
+# indefinitely (https://github.com/microsoft/playwright/issues/29572).
+# Instead we keep a real viewport (1920x1080) and spoof window.outerWidth /
+# window.outerHeight via this init script so they match. Facebook reads these
+# four values and flags a mismatch as a bot signal.
 # ---------------------------------------------------------------------------
 _STEALTH_SCRIPT = """
 // ── 1. navigator.webdriver ──────────────────────────────────────────────
+// Must be `undefined`, NOT `false`.
 Object.defineProperty(navigator, 'webdriver', {
     get: () => undefined,
     configurable: true,
@@ -54,16 +54,13 @@ try { delete window._playwrightChannelHandle; } catch(_) {}
 })();
 
 // ── 3. window.outerWidth / outerHeight ───────────────────────────────────
-// THIS IS THE PRIMARY CAUSE OF THE META WHITE PAGE.
-// Playwright does not set outerWidth/outerHeight, so they return whatever
-// the OS window size is (often ~800px or inconsistent). Facebook reads these
-// on page load and flags the mismatch with screen.width (1920).
-// Must match the viewport we pass to launch_persistent_context.
+// Playwright sets the viewport (innerWidth/innerHeight) correctly but does
+// NOT set outerWidth/outerHeight — they expose the real OS window size which
+// may differ. Facebook reads all four values and flags the mismatch.
+// We spoof them to match our 1920x1080 viewport.
 try {
     Object.defineProperty(window, 'outerWidth',  { get: () => 1920, configurable: true });
     Object.defineProperty(window, 'outerHeight', { get: () => 1080, configurable: true });
-    Object.defineProperty(window, 'innerWidth',  { get: () => 1920, configurable: true });
-    Object.defineProperty(window, 'innerHeight', { get: () => 1080, configurable: true });
 } catch(_) {}
 
 // ── 4. navigator.plugins + mimeTypes ────────────────────────────────────
@@ -104,7 +101,7 @@ Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en', 'cs']
 Object.defineProperty(navigator, 'hardwareConcurrency', { get: () => 8, configurable: true });
 Object.defineProperty(navigator, 'deviceMemory',        { get: () => 8, configurable: true });
 
-// ── 7. window.chrome (loadTimes + csi are critical — absence is top-5 signal)
+// ── 7. window.chrome (loadTimes + csi are critical — absence is a top FB signal)
 window.chrome = {
     app: {
         isInstalled: false,
@@ -131,19 +128,19 @@ window.chrome = {
             firstPaintTime:          0,
             firstPaintAfterLoadTime: 0,
             navigationType:          'Other',
-            wasFetchedViaSpdy:           false,
-            wasNpnNegotiated:            false,
-            npnNegotiatedProtocol:       'unknown',
-            wasAlternateProtocolAvailable: false,
-            connectionInfo:          'http/1.1',
+            wasFetchedViaSpdy:              false,
+            wasNpnNegotiated:               false,
+            npnNegotiatedProtocol:          'unknown',
+            wasAlternateProtocolAvailable:  false,
+            connectionInfo:                 'http/1.1',
         };
     },
     csi: function() {
         return {
-            startE: Date.now(),
+            startE:  Date.now(),
             onloadT: Date.now(),
-            pageT: 3000 + Math.random() * 1000,
-            tran:  15,
+            pageT:   3000 + Math.random() * 1000,
+            tran:    15,
         };
     },
 };
@@ -162,7 +159,7 @@ if (_origPermQuery) {
     };
 }
 
-// ── 9. WebGL fingerprint ─────────────────────────────────────────────────
+// ── 9. WebGL fingerprint (SwiftShader is a direct bot signal) ─────────────
 try {
     const _getParam = WebGLRenderingContext.prototype.getParameter;
     WebGLRenderingContext.prototype.getParameter = function(param) {
@@ -221,7 +218,7 @@ try {
     };
 } catch(_) {}
 
-// ── 13. Cloak toString() on all overridden functions ─────────────────────
+// ── 13. Cloak toString() on patched functions ─────────────────────────────
 const _cloakFn = (fn) => {
     if (!fn) return;
     try {
@@ -288,15 +285,14 @@ class BrowserManager:
     ) -> BrowserContext:
         """Create or launch a persistent browser context for logged-in sessions.
 
-        Uses the user's real Chrome installation (channel='chrome') combined with
-        a comprehensive stealth init-script to bypass Facebook's bot detection,
-        including the META white-page checkpoint.
+        Uses the real Chrome installation (channel='chrome') + a full stealth
+        init-script to bypass Facebook's bot detection.
 
-        Key fix for white page: do NOT pass a fixed viewport here.
-        Instead use viewport=None so Playwright doesn't constrain the window,
-        then spoof outerWidth/outerHeight/innerWidth/innerHeight via the init
-        script. Passing a fixed viewport while also passing --start-maximized
-        creates a mismatch that FB detects.
+        NOTE: We intentionally pass a real viewport={1920, 1080} instead of
+        viewport=None. Using viewport=None with launch_persistent_context +
+        channel='chrome' triggers a known Playwright bug where page.goto()
+        hangs indefinitely. The outerWidth/outerHeight mismatch is handled
+        purely via the JS init script spoofing, which is sufficient.
         """
         if self._playwright:
             self.stop()
@@ -319,24 +315,10 @@ class BrowserManager:
             user_data_dir=str(user_data),
             channel="chrome",
             headless=is_headless,
-            # viewport=None lets Chrome own its window size (avoids the mismatch
-            # between Playwright's forced viewport and window.outerWidth that
-            # triggers Facebook's bot checkpoint).
-            viewport=None,
-            # Still tell Chrome to start at a large window so the JS spoof is
-            # consistent with the actual OS window size.
-            args=[
-                "--disable-blink-features=AutomationControlled",
-                "--disable-dev-shm-usage",
-                "--no-sandbox",
-                "--disable-infobars",
-                # Use a specific window size instead of --start-maximized which
-                # produces unpredictable values depending on the display.
-                "--window-size=1920,1080",
-                "--window-position=0,0",
-                "--disable-notifications",
-                "--hide-crash-restore-bubble",
-            ],
+            # Keep a real viewport — do NOT use viewport=None here (causes goto hang).
+            # outerWidth/outerHeight are spoofed to match via the init script.
+            viewport={"width": 1920, "height": 1080},
+            screen={"width": 1920, "height": 1080},
             locale="en-US",
             timezone_id="Europe/Prague",
             user_agent=(
@@ -345,6 +327,16 @@ class BrowserManager:
                 "Chrome/125.0.0.0 Safari/537.36"
             ),
             ignore_default_args=["--enable-automation"],
+            args=[
+                "--disable-blink-features=AutomationControlled",
+                "--disable-dev-shm-usage",
+                "--no-sandbox",
+                "--disable-infobars",
+                "--window-size=1920,1080",
+                "--window-position=0,0",
+                "--disable-notifications",
+                "--hide-crash-restore-bubble",
+            ],
             permissions=["notifications", "geolocation"],
         )
         self.context.set_default_timeout(30000)
