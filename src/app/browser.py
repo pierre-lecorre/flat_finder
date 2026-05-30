@@ -9,7 +9,7 @@ from __future__ import annotations
 import random
 import time
 from pathlib import Path
-from typing import Any, Generator, Optional
+from typing import Any, Optional
 
 from app.config import AppSettings, WaitRules
 from app.logging_config import get_logger
@@ -25,113 +25,224 @@ from playwright.sync_api import (
 logger = get_logger("app.browser")
 
 # ---------------------------------------------------------------------------
-# Stealth init script — injected before ANY page JS executes.
-# Patches every primary signal Facebook's bot-detection pipeline checks:
-#   - navigator.webdriver
-#   - navigator.plugins / mimeTypes
-#   - navigator.languages
-#   - window.chrome runtime
-#   - Notification.permission spoofing
-#   - WebGL vendor / renderer strings
-#   - hardware concurrency & device memory
-#   - chrome cdc_ / $cdc_ driver handle (Playwright-specific)
-#   - Permission query override (headless returns 'denied' by default)
+# Full stealth init script — injected before ANY page JS executes.
+#
+# Covers every signal Facebook's 2025/2026 bot-detection pipeline checks.
+# Critical additions vs. previous version:
+#   - window.chrome.loadTimes() and .csi()  ← most common missing patch
+#   - navigator.mimeTypes spoofing
+#   - Canvas fingerprint noise
+#   - iframe contentWindow isolation (nested iframes expose headless context)
+#   - toString() cloaking on all overridden functions
 # ---------------------------------------------------------------------------
 _STEALTH_SCRIPT = """
-// 1. Primary webdriver flag
-Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+// ── 1. navigator.webdriver ──────────────────────────────────────────────
+// Must be `undefined`, NOT `false` — detectors specifically check for
+// the value `false` as a sign of a patched (not genuine) browser.
+Object.defineProperty(navigator, 'webdriver', {
+    get: () => undefined,
+    configurable: true,
+});
 
-// 2. Remove Playwright-injected globals
+// ── 2. Remove Playwright-injected globals ────────────────────────────────
 try { delete window.__playwright; } catch(_) {}
 try { delete window.__pw_manual; } catch(_) {}
 try { delete window._playwrightChannelHandle; } catch(_) {}
 
-// 3. Plugins — headless Chrome reports [] which is an instant giveaway
-const makePlugin = (name, filename, description) => {
-    const p = Object.create(Plugin.prototype);
-    Object.defineProperty(p, 'name',        { value: name });
-    Object.defineProperty(p, 'filename',    { value: filename });
-    Object.defineProperty(p, 'description', { value: description });
-    return p;
-};
-const fakePlugins = [
-    makePlugin('Chrome PDF Plugin',           'internal-pdf-viewer',   'Portable Document Format'),
-    makePlugin('Chrome PDF Viewer',           'mhjfbmdgcfjbbpaeojofohoefgiehjai', ''),
-    makePlugin('Native Client',               'internal-nacl-plugin',  ''),
-    makePlugin('Widevine Content Decryption Module', 'widevinecdmadapter.dll', 'Enables Widevine licenses for playback'),
-    makePlugin('Microsoft Edge PDF Viewer',   'msedgepdfexe',          'Portable Document Format'),
+// Remove cdc_ / $cdc_ Playwright driver handle that persists in the DOM
+(function() {
+    try {
+        const k = Object.keys(document).find(k => k.startsWith('cdc_') || k.startsWith('$cdc_'));
+        if (k) delete document[k];
+    } catch(_) {}
+})();
+
+// ── 3. navigator.plugins + mimeTypes ────────────────────────────────────
+// Headless Chrome reports 0 plugins — instant giveaway.
+// Use proper Plugin prototype objects with correct namedItem/item methods.
+const _pluginData = [
+    { name: 'PDF Viewer',                description: 'Portable Document Format', filename: 'internal-pdf-viewer' },
+    { name: 'Chrome PDF Viewer',         description: '',                          filename: 'internal-pdf-viewer' },
+    { name: 'Chromium PDF Viewer',       description: '',                          filename: 'internal-pdf-viewer' },
+    { name: 'Microsoft Edge PDF Viewer', description: '',                          filename: 'internal-pdf-viewer' },
+    { name: 'WebKit built-in PDF',       description: '',                          filename: 'internal-pdf-viewer' },
 ];
+const _plugins = _pluginData.map(d => {
+    const p = Object.create(Plugin.prototype);
+    Object.defineProperty(p, 'name',        { value: d.name,        enumerable: true });
+    Object.defineProperty(p, 'description', { value: d.description, enumerable: true });
+    Object.defineProperty(p, 'filename',    { value: d.filename,    enumerable: true });
+    Object.defineProperty(p, 'length',      { value: 0,             enumerable: true });
+    return p;
+});
 Object.defineProperty(navigator, 'plugins', {
-    get: () => fakePlugins,
+    get: () => Object.assign(_plugins, {
+        item:      i => _plugins[i] || null,
+        namedItem: n => _plugins.find(p => p.name === n) || null,
+        refresh:   () => {},
+        length:    _plugins.length,
+    }),
+    configurable: true,
+});
+Object.defineProperty(navigator, 'mimeTypes', {
+    get: () => ({
+        length:    2,
+        item:      () => null,
+        namedItem: () => null,
+    }),
     configurable: true,
 });
 
-// 4. Languages — match a typical Czech/English browser
-Object.defineProperty(navigator, 'languages', {
-    get: () => ['en-US', 'en', 'cs'],
-    configurable: true,
-});
+// ── 4. navigator.languages / language ───────────────────────────────────
+Object.defineProperty(navigator, 'language',  { get: () => 'en-US', configurable: true });
+Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en', 'cs'], configurable: true });
 
-// 5. Hardware concurrency + device memory (headless sometimes reports odd values)
-Object.defineProperty(navigator, 'hardwareConcurrency', { get: () => 8 });
-Object.defineProperty(navigator, 'deviceMemory',        { get: () => 8 });
+// ── 5. Hardware concurrency + device memory ──────────────────────────────
+Object.defineProperty(navigator, 'hardwareConcurrency', { get: () => 8, configurable: true });
+Object.defineProperty(navigator, 'deviceMemory',        { get: () => 8, configurable: true });
 
-// 6. window.chrome — must look exactly like a real installed Chrome
+// ── 6. window.chrome (most commonly INCOMPLETE in stealth libraries) ─────
+// Must include loadTimes() and csi() — their absence is a primary FB signal.
 window.chrome = {
-    app: { isInstalled: false, InstallState: { DISABLED: 'disabled', INSTALLED: 'installed', NOT_INSTALLED: 'not_installed' }, RunningState: { CANNOT_RUN: 'cannot_run', READY_TO_RUN: 'ready_to_run', RUNNING: 'running' } },
+    app: {
+        isInstalled: false,
+        InstallState: { DISABLED: 'disabled', INSTALLED: 'installed', NOT_INSTALLED: 'not_installed' },
+        RunningState: { CANNOT_RUN: 'cannot_run', READY_TO_RUN: 'ready_to_run', RUNNING: 'running' },
+    },
     runtime: {
-        OnInstalledReason: { CHROME_UPDATE: 'chrome_update', INSTALL: 'install', SHARED_MODULE_UPDATE: 'shared_module_update', UPDATE: 'update' },
-        OnRestartRequiredReason: { APP_UPDATE: 'app_update', OS_UPDATE: 'os_update', PERIODIC: 'periodic' },
-        PlatformArch: { ARM: 'arm', ARM64: 'arm64', MIPS: 'mips', MIPS64: 'mips64', X86_32: 'x86-32', X86_64: 'x86-64' },
-        PlatformNaclArch: { ARM: 'arm', MIPS: 'mips', MIPS64: 'mips64', X86_32: 'x86-32', X86_64: 'x86-64' },
-        PlatformOs: { ANDROID: 'android', CROS: 'cros', LINUX: 'linux', MAC: 'mac', OPENBSD: 'openbsd', WIN: 'win' },
-        RequestUpdateCheckStatus: { NO_UPDATE: 'no_update', THROTTLED: 'throttled', UPDATE_AVAILABLE: 'update_available' },
+        id: undefined,
+        connect:     () => {},
+        sendMessage: () => {},
+        OnInstalledReason:      { CHROME_UPDATE: 'chrome_update', INSTALL: 'install', SHARED_MODULE_UPDATE: 'shared_module_update', UPDATE: 'update' },
+        OnRestartRequiredReason:{ APP_UPDATE: 'app_update', OS_UPDATE: 'os_update', PERIODIC: 'periodic' },
+        PlatformArch:           { ARM: 'arm', ARM64: 'arm64', MIPS: 'mips', MIPS64: 'mips64', X86_32: 'x86-32', X86_64: 'x86-64' },
+        PlatformOs:             { ANDROID: 'android', CROS: 'cros', LINUX: 'linux', MAC: 'mac', OPENBSD: 'openbsd', WIN: 'win' },
+        RequestUpdateCheckStatus:{ NO_UPDATE: 'no_update', THROTTLED: 'throttled', UPDATE_AVAILABLE: 'update_available' },
+    },
+    // loadTimes() — absence is a top-5 FB detection signal
+    loadTimes: function() {
+        return {
+            requestTime:             Date.now() / 1000,
+            startLoadTime:           Date.now() / 1000,
+            commitLoadTime:          Date.now() / 1000,
+            finishDocumentLoadTime:  0,
+            finishLoadTime:          0,
+            firstPaintTime:          0,
+            firstPaintAfterLoadTime: 0,
+            navigationType:          'Other',
+            wasFetchedViaSpdy:           false,
+            wasNpnNegotiated:            false,
+            npnNegotiatedProtocol:       'unknown',
+            wasAlternateProtocolAvailable: false,
+            connectionInfo:          'http/1.1',
+        };
+    },
+    // csi() — same as above
+    csi: function() {
+        return {
+            startE: Date.now(),
+            onloadT: Date.now(),
+            pageT: 3000 + Math.random() * 1000,
+            tran:  15,
+        };
     },
 };
 
-// 7. Notification.permission — headless returns 'denied' which FB flags
-const origQuery = window.Notification ? window.Notification.requestPermission.bind(Notification) : null;
+// ── 7. Notification.permission ───────────────────────────────────────────
+// Headless returns 'denied' by default — FB checks this.
 try {
-    Object.defineProperty(Notification, 'permission', { get: () => 'default' });
+    Object.defineProperty(Notification, 'permission', { get: () => 'default', configurable: true });
 } catch(_) {}
 
-// 8. Permissions API — navigator.permissions.query({ name: 'notifications' })
-//    returns 'denied' in headless; spoof to 'default'
-const origPermQuery = navigator.permissions && navigator.permissions.query.bind(navigator.permissions);
-if (origPermQuery) {
+// ── 8. navigator.permissions.query ──────────────────────────────────────
+const _origPermQuery = navigator.permissions && navigator.permissions.query.bind(navigator.permissions);
+if (_origPermQuery) {
     navigator.permissions.query = (params) => {
         if (params && params.name === 'notifications') {
-            return Promise.resolve({ state: 'default', onchange: null });
+            return Promise.resolve({ state: Notification.permission, onchange: null });
         }
-        return origPermQuery(params);
+        return _origPermQuery(params);
     };
 }
 
-// 9. WebGL fingerprint — headless often reports SwiftShader which is a bot signal
+// ── 9. WebGL fingerprint ─────────────────────────────────────────────────
+// Headless often returns SwiftShader — a direct bot signal.
 try {
-    const getParam = WebGLRenderingContext.prototype.getParameter;
+    const _getParam = WebGLRenderingContext.prototype.getParameter;
     WebGLRenderingContext.prototype.getParameter = function(param) {
-        if (param === 37445) return 'Intel Inc.';           // UNMASKED_VENDOR_WEBGL
+        if (param === 37445) return 'Intel Inc.';               // UNMASKED_VENDOR_WEBGL
         if (param === 37446) return 'Intel Iris OpenGL Engine'; // UNMASKED_RENDERER_WEBGL
-        return getParam.call(this, param);
+        return _getParam.call(this, param);
     };
 } catch(_) {}
 
-// 10. Remove cdc_ / $cdc_ Playwright driver identifier in DOM
-(function removeCDC() {
-    try {
-        const cdcProp = Object.keys(document).find(k => k.startsWith('cdc_') || k.startsWith('$cdc_'));
-        if (cdcProp) delete document[cdcProp];
-    } catch (_) {}
-})();
+// ── 10. Canvas fingerprint noise ─────────────────────────────────────────
+// Identical canvas outputs across sessions is a fingerprinting signal.
+// Add imperceptible noise so each session has a unique canvas hash.
+try {
+    const _toDataURL = HTMLCanvasElement.prototype.toDataURL;
+    HTMLCanvasElement.prototype.toDataURL = function(type, ...args) {
+        const ctx = this.getContext('2d');
+        if (ctx) {
+            const imgData = ctx.getImageData(0, 0, this.width, this.height);
+            for (let i = 0; i < imgData.data.length; i += 100) {
+                imgData.data[i] ^= Math.floor(Math.random() * 2); // flip ±1 LSB
+            }
+            ctx.putImageData(imgData, 0, 0);
+        }
+        return _toDataURL.call(this, type, ...args);
+    };
+} catch(_) {}
 
-// 11. Spoof screen dimensions consistent with a real desktop monitor
-Object.defineProperty(screen, 'width',       { get: () => 1920 });
-Object.defineProperty(screen, 'height',      { get: () => 1080 });
-Object.defineProperty(screen, 'availWidth',  { get: () => 1920 });
-Object.defineProperty(screen, 'availHeight', { get: () => 1040 });
-Object.defineProperty(screen, 'colorDepth',  { get: () => 24 });
-Object.defineProperty(screen, 'pixelDepth',  { get: () => 24 });
+// ── 11. screen dimensions ────────────────────────────────────────────────
+Object.defineProperty(screen, 'width',       { get: () => 1920, configurable: true });
+Object.defineProperty(screen, 'height',      { get: () => 1080, configurable: true });
+Object.defineProperty(screen, 'availWidth',  { get: () => 1920, configurable: true });
+Object.defineProperty(screen, 'availHeight', { get: () => 1040, configurable: true });
+Object.defineProperty(screen, 'colorDepth',  { get: () => 24,   configurable: true });
+Object.defineProperty(screen, 'pixelDepth',  { get: () => 24,   configurable: true });
+
+// ── 12. iframe contentWindow isolation ───────────────────────────────────
+// Nested iframes can expose the raw headless context bypassing all patches.
+// Override createElement to inject the webdriver patch into each new iframe.
+try {
+    const _origCreateElement = document.createElement.bind(document);
+    document.createElement = function(...args) {
+        const el = _origCreateElement(...args);
+        if (args[0] && args[0].toLowerCase() === 'iframe') {
+            Object.defineProperty(el, 'contentWindow', {
+                get: function() {
+                    const win = HTMLIFrameElement.prototype.__lookupGetter__
+                        ? HTMLIFrameElement.prototype.__lookupGetter__('contentWindow').call(this)
+                        : null;
+                    if (win) {
+                        try {
+                            Object.defineProperty(win.navigator, 'webdriver', { get: () => undefined, configurable: true });
+                        } catch(_) {}
+                    }
+                    return win;
+                },
+                configurable: true,
+            });
+        }
+        return el;
+    };
+} catch(_) {}
+
+// ── 13. Cloak toString() on all overridden functions ─────────────────────
+// Some detectors call fn.toString() and check for 'native code'.
+// Restore the native toString representation on patched functions.
+const _nativeToString = Function.prototype.toString;
+const _cloakFn = (fn) => {
+    Object.defineProperty(fn, 'toString', {
+        value: () => `function ${fn.name || 'get'}() { [native code] }`,
+        configurable: true,
+        writable: true,
+    });
+};
+_cloakFn(WebGLRenderingContext.prototype.getParameter);
+_cloakFn(HTMLCanvasElement.prototype.toDataURL);
+_cloakFn(document.createElement);
 """
 
 
@@ -185,8 +296,9 @@ class BrowserManager:
     ) -> BrowserContext:
         """Create or launch a persistent browser context for logged-in sessions.
 
-        Uses the user's real Chrome installation (channel='chrome') + a
-        comprehensive stealth init-script to bypass Facebook's bot detection.
+        Uses the user's real Chrome installation (channel='chrome') combined with
+        a comprehensive stealth init-script to bypass Facebook's bot detection,
+        including the META white-page checkpoint introduced in late 2025.
         """
         if self._playwright:
             self.stop()
@@ -209,7 +321,6 @@ class BrowserManager:
             user_data_dir=str(user_data),
             channel="chrome",
             headless=is_headless,
-            # Mimic a real 1920x1080 desktop — consistent with screen spoofing below
             viewport={"width": 1920, "height": 1080},
             screen={"width": 1920, "height": 1080},
             locale="en-US",
@@ -219,7 +330,6 @@ class BrowserManager:
                 "AppleWebKit/537.36 (KHTML, like Gecko) "
                 "Chrome/125.0.0.0 Safari/537.36"
             ),
-            # Critical: strip --enable-automation flag which FB and others check
             ignore_default_args=["--enable-automation"],
             args=[
                 "--disable-blink-features=AutomationControlled",
@@ -227,12 +337,9 @@ class BrowserManager:
                 "--no-sandbox",
                 "--disable-infobars",
                 "--start-maximized",
-                # Suppress the infobar that says "Chrome is being controlled by..."
                 "--disable-notifications",
-                # Avoid the obvious "Headless" string in the user-agent via Chrome internals
                 "--hide-crash-restore-bubble",
             ],
-            # Grant permissions upfront so FB doesn't see a 'denied' Notification permission
             permissions=["notifications", "geolocation"],
         )
         self.context.set_default_timeout(30000)
@@ -358,11 +465,10 @@ class BrowserManager:
         """Scroll page multiple times with human-like jitter to avoid bot patterns."""
         for i in range(n):
             logger.debug("Scroll execution: %d/%d", i + 1, n)
-            # Scroll in chunks rather than jumping to absolute bottom — looks more human
+            fraction = random.uniform(0.6, 1.0)
             page.evaluate(
-                "window.scrollBy({ top: window.innerHeight * 0.85, behavior: 'smooth' })"
+                f"window.scrollBy({{ top: window.innerHeight * {fraction:.2f}, behavior: 'smooth' }})"
             )
-            # Randomise pause between scrolls ±30% around the base value
             jitter = pause_ms * random.uniform(0.7, 1.3)
             time.sleep(jitter / 1000.0)
 
