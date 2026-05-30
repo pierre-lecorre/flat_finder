@@ -12,7 +12,8 @@ license = { text = "MIT" }
 authors = [{ name = "Flat Finder" }]
 
 dependencies = [
-    "playwright>=1.44",
+    "undetected-chromedriver>=3.5",
+    "selenium>=4.21",
     "pydantic>=2.7",
     "pydantic-settings>=2.3",
     "pyyaml>=6.0",
