@@ -1,20 +1,11 @@
-"""Selenium + undetected-chromedriver browser manager.
-
-Replaces the previous Playwright implementation which suffered from
-irreproducible goto() hangs when using launch_persistent_context +
-channel='chrome' + viewport=None on Windows.
-
-undetected-chromedriver (uc) patches the Chrome binary at runtime to
-remove every automation fingerprint that Facebook and other sites check.
-It wraps the standard Selenium WebDriver API, so all helper methods
-(navigate, extract_text, scroll, etc.) continue to work unchanged.
-"""
+"""Selenium + undetected-chromedriver browser manager."""
 
 from __future__ import annotations
 
 import random
 import re
 import subprocess
+import sys
 import time
 from datetime import datetime
 from pathlib import Path
@@ -33,32 +24,54 @@ logger = get_logger("app.browser")
 
 
 def _detect_chrome_major_version() -> Optional[int]:
-    """Return the installed Chrome major version number, or None if undetectable."""
-    candidates = [
-        # Windows — typical install paths
+    """Return installed Chrome major version, trying multiple strategies."""
+
+    # Strategy 1: Windows registry (most reliable on Windows)
+    if sys.platform == "win32":
+        try:
+            import winreg
+            for hive in (winreg.HKEY_CURRENT_USER, winreg.HKEY_LOCAL_MACHINE):
+                for subkey in (
+                    r"Software\Google\Chrome\BLBeacon",
+                    r"Software\Wow6432Node\Google\Chrome\BLBeacon",
+                ):
+                    try:
+                        with winreg.OpenKey(hive, subkey) as key:
+                            version, _ = winreg.QueryValueEx(key, "version")
+                            match = re.match(r"(\d+)", str(version))
+                            if match:
+                                v = int(match.group(1))
+                                logger.info("Detected Chrome version from registry: %d", v)
+                                return v
+                    except OSError:
+                        continue
+        except Exception as exc:
+            logger.debug("Registry Chrome detection failed: %s", exc)
+
+    # Strategy 2: Known Windows exe paths
+    win_paths = [
         r"C:\Program Files\Google\Chrome\Application\chrome.exe",
         r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
-        # Also try via registry / PATH
-        "google-chrome",
-        "google-chrome-stable",
-        "chromium-browser",
-        "chromium",
+        Path.home() / r"AppData\Local\Google\Chrome\Application\chrome.exe",
     ]
+    # Strategy 3: CLI (Linux/Mac)
+    cli_names = ["google-chrome", "google-chrome-stable", "chromium-browser", "chromium"]
+
+    candidates = (win_paths if sys.platform == "win32" else []) + cli_names
     for exe in candidates:
         try:
             result = subprocess.run(
-                [exe, "--version"],
-                capture_output=True,
-                text=True,
-                timeout=5,
+                [str(exe), "--version"],
+                capture_output=True, text=True, timeout=5,
             )
             match = re.search(r"(\d+)\.\d+\.\d+", result.stdout or result.stderr)
             if match:
-                version = int(match.group(1))
-                logger.debug("Detected Chrome major version: %d", version)
-                return version
+                v = int(match.group(1))
+                logger.info("Detected Chrome version from executable: %d", v)
+                return v
         except Exception:
             continue
+
     logger.warning("Could not auto-detect Chrome version; letting uc pick automatically.")
     return None
 
@@ -79,10 +92,6 @@ class BrowserManager:
 
     def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
         self.stop()
-
-    # ------------------------------------------------------------------
-    # Lifecycle
-    # ------------------------------------------------------------------
 
     def _build_options(
         self,
@@ -105,18 +114,17 @@ class BrowserManager:
         return opts
 
     def _make_driver(self, opts: uc.ChromeOptions) -> uc.Chrome:
-        """Instantiate uc.Chrome, passing version_main when we know the Chrome version."""
+        """Instantiate uc.Chrome with the detected Chrome version."""
         kwargs: dict[str, Any] = {"options": opts, "use_subprocess": True}
         if _CHROME_VERSION is not None:
             kwargs["version_main"] = _CHROME_VERSION
         return uc.Chrome(**kwargs)
 
     def start(self, headless: Optional[bool] = None) -> None:
-        """Launch a standard (non-persistent) undetected-chromedriver instance."""
         if self.driver:
             return
         is_headless = headless if headless is not None else self.settings.browser_headless
-        logger.info("Starting undetected-chromedriver (headless=%s)...", is_headless)
+        logger.info("Starting undetected-chromedriver (headless=%s, version=%s)...", is_headless, _CHROME_VERSION)
         opts = self._build_options(is_headless)
         self.driver = self._make_driver(opts)
         self.driver.implicitly_wait(10)
@@ -124,18 +132,14 @@ class BrowserManager:
     def get_persistent_context(
         self, storage_state_path: str, headless: Optional[bool] = None
     ) -> uc.Chrome:
-        """Launch Chrome with a persistent user-data-dir for logged-in sessions."""
         if self.driver:
             self.stop()
-
         is_headless = headless if headless is not None else self.settings.browser_headless
         user_data = self.settings.browser_state_dir / "user_data"
         user_data.mkdir(parents=True, exist_ok=True)
-
         logger.info(
-            "Starting persistent undetected-chromedriver (headless=%s, profile=%s)...",
-            is_headless,
-            user_data,
+            "Starting persistent undetected-chromedriver (headless=%s, version=%s, profile=%s)...",
+            is_headless, _CHROME_VERSION, user_data,
         )
         opts = self._build_options(is_headless, user_data_dir=str(user_data))
         self.driver = self._make_driver(opts)
@@ -143,7 +147,6 @@ class BrowserManager:
         return self.driver
 
     def save_storage_state(self, path: str) -> None:
-        """Export cookies to a JSON file."""
         if not self.driver:
             logger.warning("No driver available to save storage state.")
             return
@@ -156,7 +159,6 @@ class BrowserManager:
         logger.info("Storage state (cookies) saved to %s", path)
 
     def stop(self) -> None:
-        """Quit driver cleanly."""
         if self.driver:
             try:
                 self.driver.quit()
@@ -166,19 +168,13 @@ class BrowserManager:
         logger.info("Browser driver stopped.")
 
     def new_page(self) -> uc.Chrome:
-        """Open a new tab and switch to it; return the driver."""
         if not self.driver:
             self.start()
         self.driver.execute_script("window.open('');")
         self.driver.switch_to.window(self.driver.window_handles[-1])
         return self.driver
 
-    # ------------------------------------------------------------------
-    # Navigation
-    # ------------------------------------------------------------------
-
     def navigate(self, page: uc.Chrome, url: str, wait_rules: WaitRules) -> None:
-        """Navigate to URL and wait for selector; logs a warning on timeout (non-fatal)."""
         logger.info("Navigating to: %s", url)
         page.get(url)
         if wait_rules.wait_for_selector:
@@ -196,14 +192,9 @@ class BrowserManager:
 
     @staticmethod
     def wait_for(page: uc.Chrome, selector: str, timeout_ms: int = 10_000) -> None:
-        """Explicitly wait for a CSS selector to appear."""
         WebDriverWait(page, timeout_ms / 1000).until(
             EC.presence_of_element_located((By.CSS_SELECTOR, selector))
         )
-
-    # ------------------------------------------------------------------
-    # Extraction helpers
-    # ------------------------------------------------------------------
 
     @staticmethod
     def extract_text(parent: Any, selector: str) -> Optional[str]:
@@ -239,10 +230,6 @@ class BrowserManager:
         except Exception:
             return []
 
-    # ------------------------------------------------------------------
-    # Scroll / interaction helpers
-    # ------------------------------------------------------------------
-
     @staticmethod
     def scroll_to_bottom(page: uc.Chrome, pause_ms: int = 1500) -> None:
         logger.debug("Scrolling to bottom of page...")
@@ -275,7 +262,6 @@ class BrowserManager:
 
     @staticmethod
     def screenshot_on_error(page: uc.Chrome, name: str, screenshots_dir: Path) -> None:
-        """Capture a PNG screenshot on scraping failure."""
         try:
             screenshots_dir.mkdir(parents=True, exist_ok=True)
             timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
