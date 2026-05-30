@@ -17,12 +17,15 @@ import time
 from datetime import datetime
 from typing import Any
 
+import undetected_chromedriver as uc
+from selenium.webdriver.common.by import By
+from selenium.webdriver.common.action_chains import ActionChains
+
 from app.browser import BrowserManager
 from app.config import AppSettings, SiteConfig
 from app.logging_config import get_logger
 from app.models import RawListing
 from app.scrapers.base import BaseScraper
-from playwright.sync_api import Page
 
 logger = get_logger("app.scrapers.facebook")
 
@@ -46,14 +49,12 @@ class FacebookSourceScraper(BaseScraper):
             state_path = str(self.settings.browser_state_dir / "facebook.json")
 
         logger.info("Initializing persistent context for Facebook scraping...")
-        context = self.browser_manager.get_persistent_context(
+        driver = self.browser_manager.get_persistent_context(
             storage_state_path=state_path,
             headless=self.site_config.browser.headless,
         )
 
-        page = context.new_page()
         listings: list[RawListing] = []
-
         try:
             urls = self.site_config.facebook.group_urls
             if not urls:
@@ -61,40 +62,39 @@ class FacebookSourceScraper(BaseScraper):
                 return []
 
             for group_url in urls:
-                group_listings = self._scrape_group(page, group_url)
+                group_listings = self._scrape_group(driver, group_url)
                 listings.extend(group_listings)
         finally:
-            page.close()
+            self.browser_manager.stop()
 
         logger.info("Facebook scraping done. Discovered %d posts.", len(listings))
         return listings
 
-    def _scrape_group(self, page: Page, group_url: str) -> list[RawListing]:
+    def _scrape_group(self, driver: uc.Chrome, group_url: str) -> list[RawListing]:
         """Navigate to group, scroll to load posts, and extract content."""
         logger.info("Loading Facebook group URL: %s", group_url)
-
-        # Navigate with a realistic referrer so FB doesn't see a cold direct hit
-        page.set_extra_http_headers({
-            "Referer": "https://www.google.com/",
-            "Accept-Language": "en-US,en;q=0.9,cs;q=0.8",
-        })
-        page.goto(group_url, wait_until="domcontentloaded")
+        driver.get(group_url)
 
         # Simulate a human pause before doing anything
         self._human_pause(2500, 4500)
 
         # Move the mouse to a random position to look alive
-        self.browser_manager.human_mouse_move(page)
+        try:
+            ActionChains(driver).move_by_offset(
+                random.randint(200, 800), random.randint(200, 600)
+            ).perform()
+        except Exception:
+            pass
 
         # Check for login wall
-        if self._is_login_wall(page):
+        if self._is_login_wall(driver):
             logger.error(
-                "Facebook login screen detected. Please run: python -m app.cli login-facebook"
+                "Facebook login screen detected. Please run: py -m app.cli login-facebook"
             )
             return []
 
         # Check for CAPTCHA / bot-challenge page
-        if self._is_captcha_page(page):
+        if self._is_captcha_page(driver):
             logger.error(
                 "Facebook CAPTCHA / human-verification page detected. "
                 "The session may be flagged. Try: (1) re-run login-facebook, "
@@ -105,10 +105,10 @@ class FacebookSourceScraper(BaseScraper):
         # Scroll to trigger lazy-loaded posts
         scrolls = self.site_config.facebook.scroll_iterations
         logger.info("Scrolling Facebook group page %d times...", scrolls)
-        self._human_scroll(page, scrolls)
+        self._human_scroll(driver, scrolls)
 
         # Try each post selector in priority order
-        posts = self._find_posts(page)
+        posts = self._find_posts(driver)
         logger.info("Found %d visible post articles on Facebook group.", len(posts))
 
         group_listings: list[RawListing] = []
@@ -127,24 +127,26 @@ class FacebookSourceScraper(BaseScraper):
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _is_login_wall(page: Page) -> bool:
+    def _is_login_wall(driver: uc.Chrome) -> bool:
         """Return True if Facebook is showing the login gate."""
-        if "login" in page.url:
+        if "login" in driver.current_url:
             return True
-        if page.query_selector("input[name='email'], input[name='pass']"):
+        try:
+            driver.find_element(By.CSS_SELECTOR, "input[name='email'], input[name='pass']")
             return True
+        except Exception:
+            pass
         return False
 
     @staticmethod
-    def _is_captcha_page(page: Page) -> bool:
+    def _is_captcha_page(driver: uc.Chrome) -> bool:
         """Return True if Facebook is showing a CAPTCHA / bot-check challenge."""
-        url = page.url
-        if "checkpoint" in url or "captcha" in url or "twostepverification" in url:
+        url = driver.current_url
+        if any(k in url for k in ("checkpoint", "captcha", "twostepverification")):
             return True
-        # Check for the 'Confirm you are human' text in the page body
         try:
-            content = page.content()
-            if "Confirm you are human" in content or "confirm you are human" in content:
+            src = driver.page_source
+            if "Confirm you are human" in src or "confirm you are human" in src:
                 return True
         except Exception:
             pass
@@ -156,24 +158,24 @@ class FacebookSourceScraper(BaseScraper):
 
     @staticmethod
     def _human_pause(min_ms: int = 1500, max_ms: int = 4000) -> None:
-        """Sleep for a random duration to mimic a human reading the page."""
         time.sleep(random.uniform(min_ms, max_ms) / 1000.0)
 
     @staticmethod
-    def _human_scroll(page: Page, n: int) -> None:
+    def _human_scroll(driver: uc.Chrome, n: int) -> None:
         """Scroll in a human-like way: variable chunk sizes + random pauses."""
-        for i in range(n):
-            # Vary scroll distance between 60-100% of viewport height
+        for _ in range(n):
             fraction = random.uniform(0.6, 1.0)
-            page.evaluate(
-                f"window.scrollBy({{ top: window.innerHeight * {fraction:.2f}, behavior: 'smooth' }})"
+            driver.execute_script(
+                f"window.scrollBy({{ top: window.innerHeight * {fraction:.2f}, behavior: 'smooth' }});"
             )
             # Occasionally wiggle the mouse mid-scroll
             if random.random() < 0.4:
-                x = random.randint(300, 1500)
-                y = random.randint(200, 800)
-                page.mouse.move(x, y)
-            # Pause between 1.2 s and 3.5 s
+                try:
+                    ActionChains(driver).move_by_offset(
+                        random.randint(-50, 50), random.randint(-50, 50)
+                    ).perform()
+                except Exception:
+                    pass
             time.sleep(random.uniform(1.2, 3.5))
 
     # ------------------------------------------------------------------
@@ -181,12 +183,10 @@ class FacebookSourceScraper(BaseScraper):
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _find_posts(page: Page) -> list:
+    def _find_posts(driver: uc.Chrome) -> list:
         """Try multiple selector candidates and return the first non-empty result."""
-        configured_sel = None  # could be passed via site_config in future
-        candidates = ([configured_sel] if configured_sel else []) + _POST_SELECTOR_CANDIDATES
-        for sel in candidates:
-            posts = page.query_selector_all(sel)
+        for sel in _POST_SELECTOR_CANDIDATES:
+            posts = driver.find_elements(By.CSS_SELECTOR, sel)
             if posts:
                 logger.debug("Post selector '%s' matched %d elements.", sel, len(posts))
                 return posts
@@ -197,15 +197,13 @@ class FacebookSourceScraper(BaseScraper):
     # Post parsing
     # ------------------------------------------------------------------
 
-    def _parse_post(
-        self, post: Any, idx: int, group_url: str
-    ) -> RawListing | None:
+    def _parse_post(self, post: Any, idx: int, group_url: str) -> RawListing | None:
         """Extract all relevant fields from a single post element."""
         # Extract main text — grab the longest dir=auto div as the body
-        text_elements = post.query_selector_all("div[dir='auto']")
+        text_elements = post.find_elements(By.CSS_SELECTOR, "div[dir='auto']")
         text_content = ""
         for te in text_elements:
-            txt = (te.inner_text() or "").strip()
+            txt = (te.text or "").strip()
             if txt and len(txt) > len(text_content):
                 text_content = txt
 
@@ -222,27 +220,28 @@ class FacebookSourceScraper(BaseScraper):
         permalink = self._extract_permalink(post, group_url, idx)
 
         # Extract images (skip tiny UI assets)
-        image_urls = [
-            src
-            for img in post.query_selector_all("img[src]")
-            if (src := img.get_attribute("src"))
-            and "emoji" not in src
-            and "/rsrc.php/" not in src
-            and "fbcdn" in src
-        ]
+        image_urls = []
+        for img in post.find_elements(By.CSS_SELECTOR, "img[src]"):
+            src = img.get_attribute("src") or ""
+            if src and "emoji" not in src and "/rsrc.php/" not in src and "fbcdn" in src:
+                image_urls.append(src)
         primary_img = image_urls[0] if image_urls else None
 
         # Poster name
         poster_name = None
-        poster_elem = post.query_selector("strong span, a[role='link'] span")
-        if poster_elem:
-            poster_name = (poster_elem.inner_text() or "").strip()
+        try:
+            poster_elem = post.find_element(By.CSS_SELECTOR, "strong span, a[role='link'] span")
+            poster_name = (poster_elem.text or "").strip() or None
+        except Exception:
+            pass
 
         # Timestamp text
         timestamp_text = None
-        time_elem = post.query_selector("a[role='link'] span[id]")
-        if time_elem:
-            timestamp_text = (time_elem.inner_text() or "").strip()
+        try:
+            time_elem = post.find_element(By.CSS_SELECTOR, "a[role='link'] span[id]")
+            timestamp_text = (time_elem.text or "").strip() or None
+        except Exception:
+            pass
 
         # Title = first non-empty line, capped at 80 chars
         lines = [line.strip() for line in text_content.split("\n") if line.strip()]
@@ -283,24 +282,17 @@ class FacebookSourceScraper(BaseScraper):
     @staticmethod
     def _extract_permalink(post: Any, group_url: str, idx: int) -> str:
         """Best-effort permalink extraction from a post element."""
-        # Primary: anchor with /posts/ in href
-        link_elem = post.query_selector("a[role='link'][href*='/posts/']")
-        if link_elem:
-            href = link_elem.get_attribute("href")
-            if href:
-                clean = href.split("?")[0]
-                if not clean.startswith("http"):
-                    clean = "https://www.facebook.com" + clean
-                return clean
-        # Fallback: any anchor containing /groups/ in href
-        link_elem = post.query_selector("a[href*='/groups/']")
-        if link_elem:
-            href = link_elem.get_attribute("href")
-            if href:
-                clean = href.split("?")[0]
-                if not clean.startswith("http"):
-                    clean = "https://www.facebook.com" + clean
-                return clean
+        for selector in ("a[href*='/posts/']", "a[href*='/groups/']"):
+            try:
+                link_elem = post.find_element(By.CSS_SELECTOR, selector)
+                href = link_elem.get_attribute("href") or ""
+                if href:
+                    clean = href.split("?")[0]
+                    if not clean.startswith("http"):
+                        clean = "https://www.facebook.com" + clean
+                    return clean
+            except Exception:
+                continue
         return f"{group_url}#post_{idx}"
 
     # ------------------------------------------------------------------
@@ -309,17 +301,16 @@ class FacebookSourceScraper(BaseScraper):
 
     @classmethod
     def login_facebook(cls, browser_manager: BrowserManager, storage_state_path: str) -> None:
-        """Open persistent chrome browser and halt execution for manual credential login."""
-        logger.info("Initializing Playwright manual session launch...")
-        context = browser_manager.get_persistent_context(
+        """Open persistent Chrome browser and halt for manual credential login."""
+        logger.info("Initializing undetected-chromedriver manual session launch...")
+        driver = browser_manager.get_persistent_context(
             storage_state_path=storage_state_path,
             headless=False,
         )
-        page = context.new_page()
 
         try:
             logger.info("Navigating to facebook.com...")
-            page.goto("https://www.facebook.com/")
+            driver.get("https://www.facebook.com/")
             print("\n" + "=" * 80)
             print("FACEBOOK MANUAL LOGIN ASSISTANCE:")
             print("1. A browser window has opened to facebook.com.")
@@ -336,5 +327,4 @@ class FacebookSourceScraper(BaseScraper):
 
             logger.info("Facebook authentication successfully persisted in user_data_dir.")
         finally:
-            page.close()
             browser_manager.stop()
