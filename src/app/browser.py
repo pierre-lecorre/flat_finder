@@ -13,6 +13,8 @@ It wraps the standard Selenium WebDriver API, so all helper methods
 from __future__ import annotations
 
 import random
+import re
+import subprocess
 import time
 from datetime import datetime
 from pathlib import Path
@@ -28,6 +30,40 @@ from app.config import AppSettings, WaitRules
 from app.logging_config import get_logger
 
 logger = get_logger("app.browser")
+
+
+def _detect_chrome_major_version() -> Optional[int]:
+    """Return the installed Chrome major version number, or None if undetectable."""
+    candidates = [
+        # Windows — typical install paths
+        r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+        r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
+        # Also try via registry / PATH
+        "google-chrome",
+        "google-chrome-stable",
+        "chromium-browser",
+        "chromium",
+    ]
+    for exe in candidates:
+        try:
+            result = subprocess.run(
+                [exe, "--version"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+            match = re.search(r"(\d+)\.\d+\.\d+", result.stdout or result.stderr)
+            if match:
+                version = int(match.group(1))
+                logger.debug("Detected Chrome major version: %d", version)
+                return version
+        except Exception:
+            continue
+    logger.warning("Could not auto-detect Chrome version; letting uc pick automatically.")
+    return None
+
+
+_CHROME_VERSION: Optional[int] = _detect_chrome_major_version()
 
 
 class BrowserManager:
@@ -68,6 +104,13 @@ class BrowserManager:
         opts.add_argument("--lang=en-US")
         return opts
 
+    def _make_driver(self, opts: uc.ChromeOptions) -> uc.Chrome:
+        """Instantiate uc.Chrome, passing version_main when we know the Chrome version."""
+        kwargs: dict[str, Any] = {"options": opts, "use_subprocess": True}
+        if _CHROME_VERSION is not None:
+            kwargs["version_main"] = _CHROME_VERSION
+        return uc.Chrome(**kwargs)
+
     def start(self, headless: Optional[bool] = None) -> None:
         """Launch a standard (non-persistent) undetected-chromedriver instance."""
         if self.driver:
@@ -75,7 +118,7 @@ class BrowserManager:
         is_headless = headless if headless is not None else self.settings.browser_headless
         logger.info("Starting undetected-chromedriver (headless=%s)...", is_headless)
         opts = self._build_options(is_headless)
-        self.driver = uc.Chrome(options=opts, use_subprocess=True)
+        self.driver = self._make_driver(opts)
         self.driver.implicitly_wait(10)
 
     def get_persistent_context(
@@ -95,7 +138,7 @@ class BrowserManager:
             user_data,
         )
         opts = self._build_options(is_headless, user_data_dir=str(user_data))
-        self.driver = uc.Chrome(options=opts, use_subprocess=True)
+        self.driver = self._make_driver(opts)
         self.driver.implicitly_wait(10)
         return self.driver
 
@@ -145,7 +188,6 @@ class BrowserManager:
                     EC.presence_of_element_located((By.CSS_SELECTOR, wait_rules.wait_for_selector))
                 )
             except TimeoutException:
-                # Non-fatal: log and continue — cards may still be in the DOM
                 logger.warning(
                     "Selector '%s' not found within %.1fs — continuing anyway.",
                     wait_rules.wait_for_selector,
