@@ -13,13 +13,16 @@ allowed_domains:
   - "bezrealitky.cz"
 
 # Listing item card container
-listing_card_selector: "article.card, div.card"
+# Real selector from live HTML (Next.js app — classes contain hashed suffixes,
+# but the stable semantic class is `propertyCard` present on every article card)
+listing_card_selector: "article.propertyCard"
 
 extraction_mode: "hybrid"
 
 detail_page:
   enabled: true
-  link_selector: "a.card__title-link, a.card__link"
+  # Each card carousel slide contains an <a href="/nemovitosti-byty-domy..."> link
+  link_selector: "a[href*='/nemovitosti-byty-domy']"
 
 pagination:
   type: "page_param"
@@ -29,35 +32,51 @@ pagination:
 
 wait_rules:
   load_state: "domcontentloaded"
-  wait_for_selector: "article.card"
-  timeout_ms: 15000
+  # Use the stable partial class instead of the old non-existent `article.card`
+  wait_for_selector: "article.propertyCard"
+  timeout_ms: 20000
 
 # Selectors on the search cards page
+# Bezrealitky uses Next.js with hashed CSS class names.
+# The pattern `[class*='...']` targets the stable readable fragment of each class.
 fields:
   title:
-    selector: "h2.card__title, .card__title"
+    # Address line — e.g. "K Ovčínu, Prague - Kobylisy"
+    selector: "span[class*='propertyCardAddress']"
     attr: "text"
   price_text:
-    selector: "span.card__price, .card__price"
+    # Primary rent — e.g. "15,000 CZK"
+    selector: "span[class*='propertyPriceAmount']"
     attr: "text"
-  image_url:
-    selector: "figure.card__img img, img.card__img"
-    attr: "src"
+  price_additional:
+    # Service charges — e.g. "3,000 CZK"
+    selector: "span[class*='propertyPriceAdditional']"
+    attr: "text"
+  price_per_meter:
+    # Per-m² price — e.g. "682 CZK m²"
+    selector: "span[class*='propertyPricePerMeter']"
+    attr: "text"
+  listing_type:
+    # Label — e.g. "Apartment for rent"
+    selector: "span[class*='propertyCardLabel']"
+    attr: "text"
   listing_url:
-    selector: "a.card__title-link, a.card__link"
+    selector: "a[href*='/nemovitosti-byty-domy']"
     attr: "href"
-  location:
-    selector: "span.card__location, .card__location"
-    attr: "text"
+  image_url:
+    selector: "div[class*='propertyCardImageHolder'] img"
+    attr: "src"
 
 # Selectors on the detail page
 detail_fields:
   description:
-    selector: "div.description, div.b-description"
+    selector: "div[class*='description'], div[class*='b-description']"
     attr: "text"
   external_id:
-    selector: "span.listing-id, .listing-id"
-    attr: "text"
+    # URL slug contains the numeric ID — e.g. /nemovitosti-byty-domy/32696-...
+    # The ID is parsed from listing_url in post-processing.
+    selector: ""
+    attr: ""
 
 transforms:
   strip_query_params_from_url: true
@@ -79,4 +98,13 @@ browser:
   use_persistent_context: false
   storage_state_path: ""
 
-notes: "Scrapes Bezrealitky Prague flats. Uses hybrid mode to fetch description text."
+notes: |
+  Bezrealitky is a Next.js SPA. CSS class names contain hashed suffixes (e.g.
+  `PropertyCardpropertyCardAddresshNqyR`), so selectors use `[class*='...']`
+  attribute matching on the stable camelCase fragment.
+
+  Key structural facts from live HTML snapshot (2026-05-31):
+    - Each listing is <article class="propertyCard ..."> — `article.propertyCard` is stable.
+    - Clicking a card opens the detail at /nemovitosti-byty-domy/<id>-<slug>.
+    - Price block: amount + optional additional charges + per-m² figure.
+    - Pagination: `?page=N` query param, first page has no param.

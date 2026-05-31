@@ -1,0 +1,11 @@
+# Place HTML snapshots here for selector tests:
+#   bezrealitky_listing.html  — saved from the search results page
+#   bezrealitky_detail.html   — saved from a single listing detail page
+#
+# How to capture:
+#   1. Open the URL in Chrome / Firefox
+#   2. Ctrl+S → Save as "Webpage, Complete" or copy-paste the page source
+#   3. Save the .html file in this directory
+#
+# The snapshot tests in tests/test_bezrealitky_selectors.py will skip
+# automatically if these files are not present.
