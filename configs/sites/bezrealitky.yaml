@@ -2,30 +2,36 @@ site_name: "bezrealitky"
 source_type: "normal_listing_site"
 enabled: true
 
-# Search rentals in Prague
+# -----------------------------------------------------------------------
+# Search URL — Prague rentals, max 20 000 CZK, apartments only
+# -----------------------------------------------------------------------
 start_urls:
-  - "https://www.bezrealitky.cz/vyhledat?advyhledat=1&nabidka=pronajem&typNemovitosti=byt&lokalita=praha"
+  - "https://www.bezrealitky.cz/vyhledat?estateType=BYT&location=exact&offerType=PRONAJEM&osm_value=Hlavn%C3%AD+m%C4%9Bsto+Praha%2C+Praha%2C+%C4%8Cesko&priceTo=20000&regionOsmIds=R435514&currency=CZK"
 
 search_url_templates:
-  - "https://www.bezrealitky.cz/vyhledat?advyhledat=1&nabidka=pronajem&typNemovitosti=byt&lokalita=praha&page={page}"
+  - "https://www.bezrealitky.cz/vyhledat?estateType=BYT&location=exact&offerType=PRONAJEM&osm_value=Hlavn%C3%AD+m%C4%9Bsto+Praha%2C+Praha%2C+%C4%8Cesko&priceTo=20000&regionOsmIds=R435514&currency=CZK&page={page}"
 
 allowed_domains:
   - "bezrealitky.cz"
   - "bezrealitky.com"
 
-# Listing item card container
-# Real selector from live HTML (Next.js app — classes contain hashed suffixes,
-# but the stable semantic class is `propertyCard` present on every article card)
+# -----------------------------------------------------------------------
+# Card detection
+# -----------------------------------------------------------------------
 listing_card_selector: "article.propertyCard"
 
+# Two-phase mode: Phase 1 collects URLs, Phase 2 visits each detail page.
 extraction_mode: "hybrid"
 
 detail_page:
   enabled: true
-  # Cards use /properties-flats-houses/... on .com and /nemovitosti-byty-domy/... on .cz
-  # Both path fragments are matched here.
+  # Matches both .cz (/nemovitosti-byty-domy/...) and .com (/properties-flats-houses/...)
+  # The scraper validates hrefs against a regex — this selector is the browser query.
   link_selector: "a[href*='/properties-flats-houses'], a[href*='/nemovitosti-byty-domy']"
 
+# -----------------------------------------------------------------------
+# Pagination
+# -----------------------------------------------------------------------
 pagination:
   type: "page_param"
   max_pages: 5
@@ -34,52 +40,62 @@ pagination:
 
 wait_rules:
   load_state: "domcontentloaded"
-  # Use the stable partial class instead of the old non-existent `article.card`
   wait_for_selector: "article.propertyCard"
   timeout_ms: 20000
 
-# Selectors on the search cards page
-# Bezrealitky uses Next.js with hashed CSS class names.
-# The pattern `[class*='...']` targets the stable readable fragment of each class.
+# -----------------------------------------------------------------------
+# Fields extracted from listing cards (used only in card_only mode)
+# In hybrid/detail mode these are informational — actual extraction
+# happens on the detail page via detail_fields below.
+# -----------------------------------------------------------------------
 fields:
   title:
-    # Address line — e.g. "K Ovčínu, Prague - Kobylisy"
     selector: "span[class*='propertyCardAddress']"
     attr: "text"
   price_text:
-    # Primary rent — e.g. "15,000 CZK"
     selector: "span[class*='propertyPriceAmount']"
     attr: "text"
   price_additional:
-    # Service charges — e.g. "3,000 CZK"
     selector: "span[class*='propertyPriceAdditional']"
     attr: "text"
   price_per_meter:
-    # Per-m² price — e.g. "682 CZK m²"
     selector: "span[class*='propertyPricePerMeter']"
     attr: "text"
   listing_type:
-    # Label — e.g. "Apartment for rent" / "Flat to rent"
-    selector: "span[class*='offerCardLabel']"
+    selector: "span[class*='offerCardLabel'], span[class*='propertyCardLabel']"
     attr: "text"
   listing_url:
-    # Matches both .cz and .com URL paths
     selector: "a[href*='/properties-flats-houses'], a[href*='/nemovitosti-byty-domy']"
     attr: "href"
   image_url:
     selector: "div[class*='propertyCardImageHolder'] img"
     attr: "src"
 
-# Selectors on the detail page
+# -----------------------------------------------------------------------
+# Fields extracted from each individual detail page (hybrid/detail mode)
+# The scraper navigates directly to the listing URL so `driver` IS the
+# detail page — selectors run on the full detail DOM.
+# -----------------------------------------------------------------------
 detail_fields:
+  title:
+    # e.g. "Flat to rent · 1+kk · 22 m\u00b2 · K Ov\u010d\u00ednu, Prague"
+    selector: "h1, h2[class*='title'], div[class*='Title']"
+    attr: "text"
+  price_text:
+    selector: "strong[class*='price'], span[class*='Price'], div[class*='price']"
+    attr: "text"
   description:
-    # Description block — stable fragment 'offerDetailDescription' or 'OfferDetail'
-    selector: "div[class*='offerDetail'], div[class*='OfferDetail'], div[class*='description']"
+    # Multiple known class fragments — tries all, uses first match
+    selector: "div[class*='offerDetail'], div[class*='OfferDetail'], div[class*='description'], div[class*='Description']"
+    attr: "text"
+  image_url:
+    selector: "div[class*='gallery'] img, div[class*='Gallery'] img, picture img"
+    attr: "src"
+  location:
+    selector: "span[class*='address'], span[class*='Address'], div[class*='location']"
     attr: "text"
   external_id:
-    # Numeric ID extracted from URL path:
-    # /properties-flats-houses/32696-... or /nemovitosti-byty-domy/32696-...
-    # Parsed in post-processing via regex (\d+) after path segment.
+    # Parsed from URL in post-processing — no DOM selector needed
     selector: ""
     attr: ""
 
@@ -90,7 +106,6 @@ transforms:
 
 filters:
   required_fields:
-    - "title"
     - "listing_url"
   exclude_keywords: []
 
@@ -104,15 +119,24 @@ browser:
   storage_state_path: ""
 
 notes: |
-  Bezrealitky is a Next.js SPA. CSS class names contain hashed suffixes (e.g.
-  `OfferCardofferCardLabelXxYy`), so selectors use `[class*='...']`
-  attribute matching on the stable camelCase fragment.
+  Bezrealitky scraping strategy (two-phase):
 
-  Key structural facts from live HTML snapshot (2026-05-31):
-    - Each listing card: <article class="propertyCard ..."> — stable.
-    - The .cz domain uses /nemovitosti-byty-domy/<id>-<slug> paths.
-    - The .com domain (English) uses /properties-flats-houses/<id>-<slug> paths.
-    - Numeric listing ID is the first segment after the path prefix.
-    - Price block: amount + optional additional charges + per-m² figure.
-    - Pagination: ?page=N query param.
-    - Card label class: offerCardLabel (not propertyCardLabel as previously assumed).
+  Phase 1 — URL collection:
+    Visits each paginated search page (?page=N up to max_pages).
+    Extracts all hrefs matching /properties-flats-houses/ or
+    /nemovitosti-byty-domy/ as plain strings (no stale element risk).
+    Deduplicates before phase 2.
+
+  Phase 2 — Detail visits:
+    Navigates to each collected URL in the same browser tab.
+    Extracts all detail_fields from the fully-rendered page DOM.
+    External ID is parsed from the URL path (e.g. /.../<id>-<slug>).
+
+  Why two phases?
+    In the old single-pass code, card WebDriver elements became stale
+    immediately after the first detail-page navigation. All subsequent
+    card reads returned empty/wrong data from the detail page DOM.
+
+  Class name note:
+    Bezrealitky uses Next.js with hashed CSS suffixes.
+    All selectors use [class*='...'] partial matching.
