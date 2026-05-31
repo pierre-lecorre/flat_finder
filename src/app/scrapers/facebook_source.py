@@ -138,58 +138,71 @@ class FacebookSourceScraper(BaseScraper):
         self.browser_manager.scroll_n_times(driver, scrolls, pause_ms=1800)
 
         # ---------------------------------------------------------------------------
-        # Selector strategy (updated for 2025 Facebook markup):
+        # Selector strategy (updated for 2026 Facebook markup):
         #
-        # Facebook no longer uses role="article" consistently for group feed posts.
-        # The feed container has role="feed" and direct children with role="article"
-        # are still present but may be wrapped in extra divs.
+        # Facebook group feed posts are rendered as div[aria-posinset] elements
+        # inside div[role='feed']. The old div[role='article'] elements are still
+        # present in the DOM but are empty lazy-load placeholder shells — they
+        # contain no text content and should not be used.
         #
-        # Most reliable approach: look for the feed container first, then grab
-        # its direct article children. Fall back to any div[role='article'] on
-        # the page if the feed container is absent.
+        # Text extraction priority:
+        #   1. div[data-ad-rendering-role='story_message']  — always present, full text
+        #   2. div[data-ad-comet-preview='message']         — secondary content block
+        #   3. div[dir='auto'] / span[dir='auto']           — last resort fallback
         #
-        # Text is always inside `div[dir='auto']` elements; the longest such chunk
-        # that contains more than 30 chars is the post body.
-        #
-        # Post permalinks live on <a> elements whose href contains "/posts/" or
-        # "?story_fbid=" (both patterns appear in group posts).
+        # Post permalinks: /posts/ or story_fbid links may not be present until the
+        # post is clicked/expanded. Fall back to group URL + posinset index.
         # ---------------------------------------------------------------------------
         post_sel = self.site_config.facebook.post_selector
         if not post_sel:
             feeds = driver.find_elements(By.CSS_SELECTOR, "div[role='feed']")
             if feeds:
-                posts = feeds[0].find_elements(By.CSS_SELECTOR, "div[role='article']")
+                posts = feeds[0].find_elements(By.CSS_SELECTOR, "div[aria-posinset]")
             else:
-                posts = driver.find_elements(By.CSS_SELECTOR, "div[role='article']")
+                # Fallback: try aria-posinset globally, then old article selector
+                posts = driver.find_elements(By.CSS_SELECTOR, "div[aria-posinset]")
+                if not posts:
+                    posts = driver.find_elements(By.CSS_SELECTOR, "div[role='article']")
         else:
             posts = driver.find_elements(By.CSS_SELECTOR, post_sel)
 
-        logger.info("Found %d visible post articles on Facebook group.", len(posts))
+        logger.info("Found %d visible post containers on Facebook group.", len(posts))
 
         group_listings: list[RawListing] = []
 
         for idx, post in enumerate(posts):
             try:
                 # ------------------------------------------------------------------
-                # Text extraction
-                # Collect all dir="auto" text nodes and pick the longest one.
+                # Text extraction — story_message is the primary source
                 # ------------------------------------------------------------------
                 text_content = ""
-                for te in post.find_elements(By.CSS_SELECTOR, "div[dir='auto'], span[dir='auto']"):
-                    try:
-                        txt = (te.text or "").strip()
-                        if len(txt) > len(text_content):
-                            text_content = txt
-                    except StaleElementReferenceException:
-                        continue
 
-                # Also try the "See more" expanded block pattern used on newer FB
+                # Priority 1: data-ad-rendering-role='story_message'
+                story_els = post.find_elements(
+                    By.CSS_SELECTOR, "[data-ad-rendering-role='story_message']"
+                )
+                if story_els:
+                    text_content = (story_els[0].text or "").strip()
+
+                # Priority 2: data-ad-comet-preview='message'
                 if not text_content:
-                    see_more_els = post.find_elements(
-                        By.CSS_SELECTOR, "[data-ad-rendering-role='story_message']"
+                    comet_els = post.find_elements(
+                        By.CSS_SELECTOR, "[data-ad-comet-preview='message']"
                     )
-                    if see_more_els:
-                        text_content = (see_more_els[0].text or "").strip()
+                    if comet_els:
+                        text_content = (comet_els[0].text or "").strip()
+
+                # Priority 3: longest dir=auto text node (last resort)
+                if not text_content:
+                    for te in post.find_elements(
+                        By.CSS_SELECTOR, "div[dir='auto'], span[dir='auto']"
+                    ):
+                        try:
+                            txt = (te.text or "").strip()
+                            if len(txt) > len(text_content):
+                                text_content = txt
+                        except StaleElementReferenceException:
+                            continue
 
                 if not text_content or len(text_content) < 20:
                     continue  # skip image-only or near-empty posts
@@ -226,6 +239,7 @@ class FacebookSourceScraper(BaseScraper):
                     "a[href*='/posts/']",
                     "a[href*='story_fbid']",
                     "a[href*='?fbid']",
+                    "a[href*='/permalink/']",
                 ):
                     link_els = post.find_elements(By.CSS_SELECTOR, link_sel)
                     if link_els:
@@ -263,7 +277,13 @@ class FacebookSourceScraper(BaseScraper):
                 # Poster name
                 # ------------------------------------------------------------------
                 poster_name = None
-                for name_sel in ("strong span", "h2 span", "h3 span", "a[role='link'] strong"):
+                for name_sel in (
+                    "strong",
+                    "strong span",
+                    "h2 span",
+                    "h3 span",
+                    "a[role='link'] strong",
+                ):
                     name_els = post.find_elements(By.CSS_SELECTOR, name_sel)
                     if name_els:
                         name_txt = (name_els[0].text or "").strip()
