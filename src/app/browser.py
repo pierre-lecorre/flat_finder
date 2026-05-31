@@ -1,38 +1,90 @@
-"""Playwright Sync API browser manager wrapper.
-
-Provides convenient thread-safe wrappers for navigation, polite pauses,
-element text/attribute extraction, scroll management, and screenshots.
-"""
+"""Selenium + undetected-chromedriver browser manager."""
 
 from __future__ import annotations
 
 import random
+import re
+import subprocess
+import sys
 import time
+from datetime import datetime
 from pathlib import Path
-from typing import Any, Generator, Optional
+from typing import Any, Optional
+
+import undetected_chromedriver as uc
+from selenium.webdriver.common.by import By
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+from selenium.common.exceptions import TimeoutException, NoSuchElementException
 
 from app.config import AppSettings, WaitRules
 from app.logging_config import get_logger
-from playwright.sync_api import (
-    Browser,
-    BrowserContext,
-    ElementHandle,
-    Locator,
-    Page,
-    sync_playwright,
-)
 
 logger = get_logger("app.browser")
 
 
+def _detect_chrome_major_version() -> Optional[int]:
+    """Return installed Chrome major version, trying multiple strategies."""
+
+    # Strategy 1: Windows registry (most reliable on Windows)
+    if sys.platform == "win32":
+        try:
+            import winreg
+            for hive in (winreg.HKEY_CURRENT_USER, winreg.HKEY_LOCAL_MACHINE):
+                for subkey in (
+                    r"Software\Google\Chrome\BLBeacon",
+                    r"Software\Wow6432Node\Google\Chrome\BLBeacon",
+                ):
+                    try:
+                        with winreg.OpenKey(hive, subkey) as key:
+                            version, _ = winreg.QueryValueEx(key, "version")
+                            match = re.match(r"(\d+)", str(version))
+                            if match:
+                                v = int(match.group(1))
+                                logger.info("Detected Chrome version from registry: %d", v)
+                                return v
+                    except OSError:
+                        continue
+        except Exception as exc:
+            logger.debug("Registry Chrome detection failed: %s", exc)
+
+    # Strategy 2: Known Windows exe paths
+    win_paths = [
+        r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+        r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
+        Path.home() / r"AppData\Local\Google\Chrome\Application\chrome.exe",
+    ]
+    # Strategy 3: CLI (Linux/Mac)
+    cli_names = ["google-chrome", "google-chrome-stable", "chromium-browser", "chromium"]
+
+    candidates = (win_paths if sys.platform == "win32" else []) + cli_names
+    for exe in candidates:
+        try:
+            result = subprocess.run(
+                [str(exe), "--version"],
+                capture_output=True, text=True, timeout=5,
+            )
+            match = re.search(r"(\d+)\.\d+\.\d+", result.stdout or result.stderr)
+            if match:
+                v = int(match.group(1))
+                logger.info("Detected Chrome version from executable: %d", v)
+                return v
+        except Exception:
+            continue
+
+    logger.warning("Could not auto-detect Chrome version; letting uc pick automatically.")
+    return None
+
+
+_CHROME_VERSION: Optional[int] = _detect_chrome_major_version()
+
+
 class BrowserManager:
-    """Manages Playwright browser lifecycle, persistent contexts, and actions."""
+    """Manages undetected-chromedriver lifecycle, persistent profiles, and page helpers."""
 
     def __init__(self, settings: AppSettings) -> None:
         self.settings = settings
-        self._playwright = None
-        self.browser: Optional[Browser] = None
-        self.context: Optional[BrowserContext] = None
+        self.driver: Optional[uc.Chrome] = None
 
     def __enter__(self) -> BrowserManager:
         self.start()
@@ -41,261 +93,180 @@ class BrowserManager:
     def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
         self.stop()
 
+    def _build_options(
+        self,
+        headless: bool,
+        user_data_dir: Optional[str] = None,
+    ) -> uc.ChromeOptions:
+        opts = uc.ChromeOptions()
+        if headless:
+            opts.add_argument("--headless=new")
+        if user_data_dir:
+            opts.add_argument(f"--user-data-dir={user_data_dir}")
+        opts.add_argument("--window-size=1920,1080")
+        opts.add_argument("--start-maximized")
+        opts.add_argument("--disable-notifications")
+        opts.add_argument("--disable-infobars")
+        opts.add_argument("--disable-dev-shm-usage")
+        opts.add_argument("--no-sandbox")
+        opts.add_argument("--disable-gpu")
+        opts.add_argument("--lang=en-US")
+        return opts
+
+    def _make_driver(self, opts: uc.ChromeOptions) -> uc.Chrome:
+        """Instantiate uc.Chrome with the detected Chrome version."""
+        kwargs: dict[str, Any] = {"options": opts, "use_subprocess": True}
+        if _CHROME_VERSION is not None:
+            kwargs["version_main"] = _CHROME_VERSION
+        return uc.Chrome(**kwargs)
+
     def start(self, headless: Optional[bool] = None) -> None:
-        """Launch Playwright sync browser and build standard context."""
-        if self._playwright:
+        if self.driver:
             return
-
         is_headless = headless if headless is not None else self.settings.browser_headless
-        logger.info("Starting Playwright browser (headless=%s)...", is_headless)
-        self._playwright = sync_playwright().start()
-
-        # Launch chromium as standard engine
-        self.browser = self._playwright.chromium.launch(
-            headless=is_headless,
-            args=[
-                "--disable-dev-shm-usage",
-                "--no-sandbox",
-                "--disable-gpu",
-                "--window-size=1280,800",
-            ],
-        )
-
-        # Standard context configuration
-        self.context = self.browser.new_context(
-            viewport={"width": 1280, "height": 800},
-            user_agent=(
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/124.0.0.0 Safari/537.36"
-            ),
-        )
-        # 30 second global timeout default
-        self.context.set_default_timeout(30000)
+        logger.info("Starting undetected-chromedriver (headless=%s, version=%s)...", is_headless, _CHROME_VERSION)
+        opts = self._build_options(is_headless)
+        self.driver = self._make_driver(opts)
+        self.driver.implicitly_wait(10)
 
     def get_persistent_context(
         self, storage_state_path: str, headless: Optional[bool] = None
-    ) -> BrowserContext:
-        """Create or launch a persistent browser context (e.g. for logged-in sessions).
-
-        Uses the user's real Chrome installation (channel='chrome') to avoid
-        Facebook's anti-automation detection of Playwright's bundled Chromium.
-        """
-        if self._playwright:
-            # Persistent context cannot be created once browser is already launched
+    ) -> uc.Chrome:
+        if self.driver:
             self.stop()
-
         is_headless = headless if headless is not None else self.settings.browser_headless
-        state_path = Path(storage_state_path)
-        state_path.parent.mkdir(parents=True, exist_ok=True)
-
-        logger.info(
-            "Starting Playwright persistent context (headless=%s, state=%s)...",
-            is_headless,
-            state_path.name,
-        )
-        self._playwright = sync_playwright().start()
-
-        # Persistent contexts store all state (cookies, localStorage, sessions)
-        # directly inside user_data_dir. Do NOT pass storage_state here —
-        # launch_persistent_context does not support that parameter.
         user_data = self.settings.browser_state_dir / "user_data"
         user_data.mkdir(parents=True, exist_ok=True)
-
-        # Use the real Chrome install via channel="chrome" so Facebook sees a
-        # genuine browser fingerprint instead of the stripped-down Chromium
-        # that Playwright ships (which FB actively blocks).
-        self.context = self._playwright.chromium.launch_persistent_context(
-            user_data_dir=str(user_data),
-            channel="chrome",
-            headless=is_headless,
-            viewport={"width": 1280, "height": 800},
-            locale="en-US",
-            timezone_id="Europe/Prague",
-            user_agent=(
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/125.0.0.0 Safari/537.36"
-            ),
-            ignore_default_args=["--enable-automation"],
-            args=[
-                "--disable-blink-features=AutomationControlled",
-                "--disable-dev-shm-usage",
-                "--no-sandbox",
-                "--disable-infobars",
-                "--start-maximized",
-            ],
+        logger.info(
+            "Starting persistent undetected-chromedriver (headless=%s, version=%s, profile=%s)...",
+            is_headless, _CHROME_VERSION, user_data,
         )
-        self.context.set_default_timeout(30000)
-
-        # Inject stealth script on every new page to hide automation markers.
-        # This runs before any page JS and patches the primary signals that
-        # Facebook (and other anti-bot systems) use for detection.
-        self.context.add_init_script("""
-            // Hide navigator.webdriver (primary bot detection signal)
-            Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
-
-            // Hide the Playwright-injected window properties
-            delete window.__playwright;
-            delete window.__pw_manual;
-
-            // Spoof plugins array (headless Chromium reports 0 plugins)
-            Object.defineProperty(navigator, 'plugins', {
-                get: () => [1, 2, 3, 4, 5],
-            });
-
-            // Spoof languages
-            Object.defineProperty(navigator, 'languages', {
-                get: () => ['en-US', 'en', 'cs'],
-            });
-
-            // Pass Chrome-specific runtime check
-            window.chrome = { runtime: {} };
-        """)
-        return self.context
+        opts = self._build_options(is_headless, user_data_dir=str(user_data))
+        self.driver = self._make_driver(opts)
+        self.driver.implicitly_wait(10)
+        return self.driver
 
     def save_storage_state(self, path: str) -> None:
-        """Serialize session state cookies/storage to disk."""
-        if not self.context:
-            logger.warning("No context available to save storage state.")
+        if not self.driver:
+            logger.warning("No driver available to save storage state.")
             return
+        import json
         state_path = Path(path)
         state_path.parent.mkdir(parents=True, exist_ok=True)
-        self.context.storage_state(path=str(state_path))
-        logger.info("Storage state successfully saved to %s", path)
+        cookies = self.driver.get_cookies()
+        with open(state_path, "w", encoding="utf-8") as f:
+            json.dump({"cookies": cookies}, f, indent=2)
+        logger.info("Storage state (cookies) saved to %s", path)
 
     def stop(self) -> None:
-        """Close context and browser cleanly."""
-        if self.context:
+        if self.driver:
             try:
-                self.context.close()
+                self.driver.quit()
             except Exception:
                 pass
-            self.context = None
+            self.driver = None
+        logger.info("Browser driver stopped.")
 
-        if self.browser:
-            try:
-                self.browser.close()
-            except Exception:
-                pass
-            self.browser = None
-
-        if self._playwright:
-            try:
-                self._playwright.stop()
-            except Exception:
-                pass
-            self._playwright = None
-        logger.info("Playwright browser stopped.")
-
-    def new_page(self) -> Page:
-        """Create a fresh Page inside the current context."""
-        if not self.context:
+    def new_page(self) -> uc.Chrome:
+        if not self.driver:
             self.start()
-        return self.context.new_page()
+        self.driver.execute_script("window.open('');")
+        self.driver.switch_to.window(self.driver.window_handles[-1])
+        return self.driver
 
-    # -----------------------------------------------------------------------
-    # Page Helpers
-    # -----------------------------------------------------------------------
-
-    def navigate(self, page: Page, url: str, wait_rules: WaitRules) -> None:
-        """Navigate to URL and wait for configured selectors or state."""
+    def navigate(self, page: uc.Chrome, url: str, wait_rules: WaitRules) -> None:
         logger.info("Navigating to: %s", url)
-        # Using string representation of load state
-        page.goto(url, wait_until=wait_rules.load_state)  # type: ignore
-
+        page.get(url)
         if wait_rules.wait_for_selector:
             logger.debug("Waiting for selector: %s", wait_rules.wait_for_selector)
-            page.wait_for_selector(
-                wait_rules.wait_for_selector,
-                state="visible",
-                timeout=wait_rules.timeout_ms,
-            )
+            try:
+                WebDriverWait(page, wait_rules.timeout_ms / 1000).until(
+                    EC.presence_of_element_located((By.CSS_SELECTOR, wait_rules.wait_for_selector))
+                )
+            except TimeoutException:
+                logger.warning(
+                    "Selector '%s' not found within %.1fs — continuing anyway.",
+                    wait_rules.wait_for_selector,
+                    wait_rules.timeout_ms / 1000,
+                )
 
     @staticmethod
-    def wait_for(page: Page, selector: str, timeout_ms: int = 10000) -> None:
-        """Explicitly wait for a selector to appear on the page."""
-        page.wait_for_selector(selector, state="visible", timeout=timeout_ms)
+    def wait_for(page: uc.Chrome, selector: str, timeout_ms: int = 10_000) -> None:
+        WebDriverWait(page, timeout_ms / 1000).until(
+            EC.presence_of_element_located((By.CSS_SELECTOR, selector))
+        )
 
     @staticmethod
     def extract_text(parent: Any, selector: str) -> Optional[str]:
-        """Safely extract stripped inner text from a element or locator.
-
-        Returns None if element is not found.
-        """
         try:
-            elem = parent.query_selector(selector)
-            if elem:
-                txt = elem.inner_text()
-                return txt.strip() if txt else None
-        except Exception:
-            pass
-        return None
+            elem = parent.find_element(By.CSS_SELECTOR, selector)
+            txt = elem.text
+            return txt.strip() if txt else None
+        except (NoSuchElementException, Exception):
+            return None
 
     @staticmethod
     def extract_attr(parent: Any, selector: str, attr: str) -> Optional[str]:
-        """Safely extract HTML attribute value from a selector.
-
-        Returns None if element or attribute is not found.
-        """
         try:
-            elem = parent.query_selector(selector)
-            if elem:
-                val = elem.get_attribute(attr)
-                return val.strip() if val else None
-        except Exception:
-            pass
-        return None
+            elem = parent.find_element(By.CSS_SELECTOR, selector)
+            val = elem.get_attribute(attr)
+            return val.strip() if val else None
+        except (NoSuchElementException, Exception):
+            return None
 
     @staticmethod
     def extract_all_texts(parent: Any, selector: str) -> list[str]:
-        """Safely extract stripped texts from all matching nodes."""
         try:
-            elements = parent.query_selector_all(selector)
-            return [t for elem in elements if (t := (elem.inner_text() or "").strip())]
+            elements = parent.find_elements(By.CSS_SELECTOR, selector)
+            return [t for elem in elements if (t := (elem.text or "").strip())]
         except Exception:
             return []
 
     @staticmethod
     def extract_all_attrs(parent: Any, selector: str, attr: str) -> list[str]:
-        """Safely extract attributes from all matching nodes."""
         try:
-            elements = parent.query_selector_all(selector)
+            elements = parent.find_elements(By.CSS_SELECTOR, selector)
             return [a for elem in elements if (a := (elem.get_attribute(attr) or "").strip())]
         except Exception:
             return []
 
     @staticmethod
-    def scroll_to_bottom(page: Page, pause_ms: int = 1500) -> None:
-        """Scroll to the bottom of the page to trigger dynamic loads."""
+    def scroll_to_bottom(page: uc.Chrome, pause_ms: int = 1500) -> None:
         logger.debug("Scrolling to bottom of page...")
-        page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+        page.execute_script("window.scrollTo(0, document.body.scrollHeight);")
         time.sleep(pause_ms / 1000.0)
 
     @staticmethod
-    def scroll_n_times(page: Page, n: int, pause_ms: int = 1500) -> None:
-        """Scroll page multiple times to load infinite scrolling elements."""
+    def scroll_n_times(page: uc.Chrome, n: int, pause_ms: int = 1500) -> None:
         for i in range(n):
-            logger.debug("Scroll execution: %d/%d", i + 1, n)
-            page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-            time.sleep(pause_ms / 1000.0)
+            logger.debug("Scroll %d/%d", i + 1, n)
+            fraction = random.uniform(0.6, 1.0)
+            page.execute_script(
+                f"window.scrollBy({{ top: window.innerHeight * {fraction:.2f}, behavior: 'smooth' }});"
+            )
+            jitter = pause_ms * random.uniform(0.7, 1.3)
+            time.sleep(jitter / 1000.0)
+
+    @staticmethod
+    def human_mouse_move(page: uc.Chrome) -> None:
+        from selenium.webdriver.common.action_chains import ActionChains
+        x = random.randint(200, 1600)
+        y = random.randint(200, 900)
+        ActionChains(page).move_by_offset(x, y).perform()
 
     @staticmethod
     def polite_delay(min_ms: int = 1000, max_ms: int = 3000) -> None:
-        """Polite rate limiting delay using random sleep intervals."""
         delay = random.randint(min_ms, max_ms) / 1000.0
-        logger.debug("Polite delay: sleeping for %.2fs", delay)
+        logger.debug("Polite delay: %.2fs", delay)
         time.sleep(delay)
 
     @staticmethod
-    def screenshot_on_error(page: Page, name: str, screenshots_dir: Path) -> None:
-        """Capture standard PNG screenshot on scraping failure."""
+    def screenshot_on_error(page: uc.Chrome, name: str, screenshots_dir: Path) -> None:
         try:
             screenshots_dir.mkdir(parents=True, exist_ok=True)
             timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
-            filename = f"error_{name}_{timestamp}.png"
-            path = screenshots_dir / filename
-            page.screenshot(path=path)
-            logger.info("Saved error debug screenshot to %s", path)
+            path = screenshots_dir / f"error_{name}_{timestamp}.png"
+            page.save_screenshot(str(path))
+            logger.info("Saved error screenshot to %s", path)
         except Exception as exc:
-            logger.error("Failed to capture error screenshot: %s", exc)
+            logger.error("Failed to capture screenshot: %s", exc)

@@ -38,7 +38,6 @@ class FacebookSourceScraper(BaseScraper):
             state_path = str(self.settings.browser_state_dir / "facebook.json")
 
         logger.info("Initializing persistent context for Facebook scraping...")
-        # Start persistent browser session
         context = self.browser_manager.get_persistent_context(
             storage_state_path=state_path,
             headless=self.site_config.browser.headless,
@@ -62,13 +61,66 @@ class FacebookSourceScraper(BaseScraper):
         logger.info("Facebook scraping done. Discovered %d posts.", len(listings))
         return listings
 
+    def _is_flat_offer(self, text: str) -> bool:
+        """Ask the LLM to classify whether this post is a flat/room rental offer.
+
+        Returns True if the LLM considers this a genuine rental listing.
+        Falls back to True (include) if LLM is unavailable, to avoid silent data loss.
+        """
+        try:
+            from app.llm.ollama_client import OllamaClient
+            from app.llm.prompts import build_is_flat_offer_prompt
+
+            client = OllamaClient(
+                host=self.settings.ollama_host,
+                model=self.settings.ollama_model,
+            )
+            if not client.is_available():
+                logger.debug("Ollama unavailable; skipping flat-offer classification.")
+                return True
+
+            prompt = build_is_flat_offer_prompt(text)
+            raw_response = client.generate(prompt)
+            parsed = json.loads(raw_response)
+            result = bool(parsed.get("is_flat_offer", True))
+            logger.debug("LLM flat-offer classification: %s", result)
+            return result
+        except Exception as exc:
+            logger.warning("LLM flat-offer check failed (%s); defaulting to include.", exc)
+            return True
+
+    def _enrich_text_with_llm(self, text: str) -> str:
+        """Ask the LLM to extend / clean the raw post text into a richer description.
+
+        Returns the enriched text, or the original text if LLM is unavailable.
+        """
+        try:
+            from app.llm.ollama_client import OllamaClient
+            from app.llm.prompts import build_text_enrichment_prompt
+
+            client = OllamaClient(
+                host=self.settings.ollama_host,
+                model=self.settings.ollama_model,
+            )
+            if not client.is_available():
+                logger.debug("Ollama unavailable; skipping text enrichment.")
+                return text
+
+            prompt = build_text_enrichment_prompt(text)
+            raw_response = client.generate(prompt)
+            parsed = json.loads(raw_response)
+            enriched = parsed.get("enriched_text", "").strip()
+            return enriched if enriched else text
+        except Exception as exc:
+            logger.warning("LLM text enrichment failed (%s); keeping original.", exc)
+            return text
+
     def _scrape_group(self, page: Page, group_url: str) -> list[RawListing]:
-        """Navigate to group, scroll N times to trigger posts rendering, and extract content."""
+        """Navigate to group, scroll N times to trigger post rendering, and extract content."""
         logger.info("Loading Facebook group URL: %s", group_url)
         page.goto(group_url, wait_until="domcontentloaded")
         page.wait_for_timeout(3000)  # settle pause
 
-        # Check if login prompt blocking screen
         if "login" in page.url or page.query_selector("input[name='email']"):
             logger.error(
                 "Facebook login screen detected. Please execute standard login first "
@@ -76,111 +128,190 @@ class FacebookSourceScraper(BaseScraper):
             )
             return []
 
-        # Perform scroll iterations to render dynamic posts
         scrolls = self.site_config.facebook.scroll_iterations
         logger.info("Scrolling Facebook group page %d times...", scrolls)
         self.browser_manager.scroll_n_times(page, scrolls, pause_ms=1800)
 
-        # Standard post card selector candidates
-        # Facebook updates selectors constantly.
-        # Typically post blocks are wrapped inside divs with role="feed" or feed elements
-        # We search standard div with role="article" or generic post classes
+        # ---------------------------------------------------------------------------
+        # Selector strategy (updated for 2025 Facebook markup):
+        #
+        # Facebook no longer uses role="article" consistently for group feed posts.
+        # The feed container has role="feed" and direct children with role="article"
+        # are still present but may be wrapped in extra divs.
+        #
+        # Most reliable approach: look for the feed container first, then grab
+        # its direct article children.  Fall back to any div[role='article'] on
+        # the page if the feed container is absent.
+        #
+        # Text is always inside `div[dir='auto']` elements; the longest such chunk
+        # that contains more than 30 chars is the post body.
+        #
+        # Post permalinks live on <a> elements whose href contains "/posts/" or
+        # "?story_fbid=" (both patterns appear in group posts).
+        # ---------------------------------------------------------------------------
         post_sel = self.site_config.facebook.post_selector
         if not post_sel:
-            post_sel = "div[role='article']"
+            # Try feed-scoped articles first, fall back to page-wide
+            feed = page.query_selector("div[role='feed']")
+            if feed:
+                posts = feed.query_selector_all("div[role='article']")
+            else:
+                posts = page.query_selector_all("div[role='article']")
+        else:
+            posts = page.query_selector_all(post_sel)
 
-        posts = page.query_selector_all(post_sel)
         logger.info("Found %d visible post articles on Facebook group.", len(posts))
 
         group_listings: list[RawListing] = []
 
         for idx, post in enumerate(posts):
             try:
-                # Extract main text body
-                # Typical FB text block is nested inside dir="auto" divs
-                text_elements = post.query_selector_all("div[dir='auto']")
+                # ------------------------------------------------------------------
+                # Text extraction
+                # Collect all dir="auto" text nodes and pick the longest one with
+                # meaningful length.  This handles both short + long posts reliably.
+                # ------------------------------------------------------------------
                 text_content = ""
-                for te in text_elements:
+                for te in post.query_selector_all("div[dir='auto'], span[dir='auto']"):
                     txt = (te.inner_text() or "").strip()
-                    if txt and len(txt) > len(text_content):
-                        text_content = txt  # grab longest text chunk as main body
+                    if len(txt) > len(text_content):
+                        text_content = txt
 
+                # Also try the "See more" expanded block pattern used on newer FB
                 if not text_content:
-                    continue  # skip image-only posts with no text
+                    see_more = post.query_selector("[data-ad-rendering-role='story_message']")
+                    if see_more:
+                        text_content = (see_more.inner_text() or "").strip()
 
-                # Check inclusion/exclusion keywords
+                if not text_content or len(text_content) < 20:
+                    continue  # skip image-only or near-empty posts
+
+                # ------------------------------------------------------------------
+                # Keyword exclusion filter
+                # ------------------------------------------------------------------
                 desc_lower = text_content.lower()
                 is_filtered = False
                 for kw in self.site_config.filters.exclude_keywords:
                     if kw.lower() in desc_lower:
                         is_filtered = True
                         break
-
                 if is_filtered:
                     continue
 
-                # Extract post permalink
-                # FB post links are typically found inside standard anchor tags pointing to /groups/.../posts/...
-                link_elem = post.query_selector("a[role='link'][href*='/posts/']")
+                # ------------------------------------------------------------------
+                # LLM flat-offer classification
+                # Skip posts that are not actual rental listings (e.g. questions,
+                # recommendations, community posts, etc.)
+                # ------------------------------------------------------------------
+                if not self._is_flat_offer(text_content):
+                    logger.debug("Post #%d classified as non-flat-offer; skipping.", idx)
+                    continue
+
+                # ------------------------------------------------------------------
+                # LLM text enrichment
+                # Extend / clean the raw post text into a richer description.
+                # ------------------------------------------------------------------
+                enriched_text = self._enrich_text_with_llm(text_content)
+
+                # ------------------------------------------------------------------
+                # Permalink extraction
+                # Match both /posts/ and story_fbid patterns
+                # ------------------------------------------------------------------
                 permalink = None
-                if link_elem:
-                    href = link_elem.get_attribute("href")
-                    if href:
-                        # Clean query parameters to avoid tracking tokens
-                        permalink = href.split("?")[0]
-                        if not permalink.startswith("http"):
-                            permalink = "https://www.facebook.com" + permalink
+                for link_sel in (
+                    "a[href*='/posts/']",
+                    "a[href*='story_fbid']",
+                    "a[href*='?fbid']",
+                ):
+                    link_elem = post.query_selector(link_sel)
+                    if link_elem:
+                        href = link_elem.get_attribute("href") or ""
+                        if href:
+                            permalink = href.split("?")[0]
+                            if not permalink.startswith("http"):
+                                permalink = "https://www.facebook.com" + permalink
+                            break
 
                 if not permalink:
                     permalink = f"{group_url}#post_{idx}"
 
-                # Extract images inside post
-                img_elements = post.query_selector_all("img[src]")
+                # ------------------------------------------------------------------
+                # Image URLs
+                # Filter out tiny sprite icons served from rsrc.php and UI avatars
+                # ------------------------------------------------------------------
                 image_urls = []
-                for img in img_elements:
-                    src = img.get_attribute("src")
-                    # Exclude tiny UI icon buttons/avatars
-                    if src and "emoji" not in src and "/rsrc.php/" not in src and "fbcdn" in src:
+                for img in post.query_selector_all("img[src]"):
+                    src = img.get_attribute("src") or ""
+                    if (
+                        src
+                        and "emoji" not in src
+                        and "/rsrc.php/" not in src
+                        and "fbcdn" in src
+                        and "_s." not in src  # exclude tiny thumbnail variants
+                    ):
                         image_urls.append(src)
 
                 primary_img = image_urls[0] if image_urls else None
 
-                # Extract metadata: poster name, relative timestamp
+                # ------------------------------------------------------------------
+                # Poster name
+                # FB renders the author inside a <strong> or the first <a role='link'>
+                # inside the post header area.
+                # ------------------------------------------------------------------
                 poster_name = None
-                poster_elem = post.query_selector("strong span, a[role='link'] span")
-                if poster_elem:
-                    poster_name = (poster_elem.inner_text() or "").strip()
+                for name_sel in ("strong span", "h2 span", "h3 span", "a[role='link'] strong"):
+                    poster_elem = post.query_selector(name_sel)
+                    if poster_elem:
+                        name_txt = (poster_elem.inner_text() or "").strip()
+                        if name_txt:
+                            poster_name = name_txt
+                            break
 
+                # ------------------------------------------------------------------
+                # Timestamp
+                # New markup uses <a> with an aria-label containing the date string,
+                # or a nested <abbr> / <span> with a title attribute.
+                # ------------------------------------------------------------------
                 timestamp_text = None
-                time_elem = post.query_selector("a[role='link'] span[id]")
-                if time_elem:
-                    timestamp_text = (time_elem.inner_text() or "").strip()
+                for ts_sel in (
+                    "a[aria-label] span",
+                    "abbr[data-utime]",
+                    "span[id] a span",
+                ):
+                    time_elem = post.query_selector(ts_sel)
+                    if time_elem:
+                        ts_txt = (time_elem.inner_text() or "").strip()
+                        if ts_txt:
+                            timestamp_text = ts_txt
+                            break
 
-                # Title is the first line of the description
-                lines = [line.strip() for line in text_content.split("\n") if line.strip()]
+                # Title = first non-empty line of the enriched text (capped at 80 chars)
+                lines = [line.strip() for line in enriched_text.split("\n") if line.strip()]
                 title = lines[0][:80] if lines else "Facebook Post"
 
-                # Standard build
-                # Generate unique hash for deduplication
                 from app.utils import generate_listing_hash
                 listing_hash = generate_listing_hash(
                     self.source_id,
                     title,
                     None,
-                    group_url
+                    group_url,
                 )
 
                 raw = RawListing(
                     source_id=self.source_id,
-                    external_id=permalink.split("/posts/")[-1].replace("/", "") if "/posts/" in permalink else None,
+                    external_id=(
+                        permalink.split("/posts/")[-1].replace("/", "")
+                        if "/posts/" in permalink
+                        else None
+                    ),
                     listing_url=permalink,
                     canonical_url=permalink,
                     raw_title=title,
-                    raw_price_text=text_content,  # pass description to price text to extract numeric price if mentioned in post
+                    raw_price_text=enriched_text,
                     raw_location_text=group_url,
-                    raw_description=text_content,
-                    raw_layout_text=text_content,  # pass to parsing heuristics
-                    raw_area_text=text_content,
+                    raw_description=enriched_text,
+                    raw_layout_text=enriched_text,
+                    raw_area_text=enriched_text,
                     raw_fees_text=None,
                     raw_deposit_text=None,
                     raw_image_url=primary_img,
@@ -191,7 +322,8 @@ class FacebookSourceScraper(BaseScraper):
                     "poster_name": poster_name,
                     "timestamp_text": timestamp_text,
                     "scraped_at": datetime.utcnow().isoformat(),
-                    "source_group": group_url
+                    "source_group": group_url,
+                    "original_text": text_content,
                 })
 
                 group_listings.append(raw)
@@ -206,9 +338,6 @@ class FacebookSourceScraper(BaseScraper):
     def login_facebook(cls, browser_manager: BrowserManager, storage_state_path: str) -> None:
         """Open persistent chrome browser and halt execution for manual credential login."""
         logger.info("Initializing Playwright manual session launch...")
-        # Start persistent browser in non-headless mode to let user interact.
-        # With a persistent context, all cookies, localStorage, and session data
-        # are automatically saved inside the user_data_dir when the context closes.
         context = browser_manager.get_persistent_context(
             storage_state_path=storage_state_path,
             headless=False,
@@ -227,7 +356,6 @@ class FacebookSourceScraper(BaseScraper):
             print("=" * 80)
             input("\n--> Press ENTER in this console once you are fully logged in...")
 
-            # Also export a JSON snapshot as backup
             try:
                 browser_manager.save_storage_state(storage_state_path)
             except Exception as exc:
@@ -237,4 +365,3 @@ class FacebookSourceScraper(BaseScraper):
         finally:
             page.close()
             browser_manager.stop()
-

@@ -12,7 +12,7 @@ graph TD
     B --> C[Site Registry]
     C --> D[Generic Listing Scraper]
     C --> E[Facebook Source Adapter]
-    D --> F[Browser Manager - Playwright]
+    D --> F[Browser Manager - undetected-chromedriver]
     E --> F
     D --> G[Raw Parser + Normalizer]
     E --> G
@@ -26,7 +26,7 @@ graph TD
 ```
 
 The system operates in a robust, **two-stage pipeline**:
-1. **Scraping Stage**: Navigates targets using Playwright sync API, extracts raw items using CSS selectors, runs deterministic parsing logic, and records entries to `listings_raw`.
+1. **Scraping Stage**: Navigates targets using `undetected-chromedriver` (Selenium), extracts raw items using CSS selectors, runs deterministic parsing logic, and records entries to `listings_raw`.
 2. **Enrichment Stage**: Reads un-enriched rows, passes unstructured data to a local Ollama LLM, validates structured JSON outputs via Pydantic, calculates Prague housing target scores (0-100), and records completed results to `listings_enriched`.
 
 ---
@@ -34,7 +34,7 @@ The system operates in a robust, **two-stage pipeline**:
 ## 🛠️ Prerequisites
 
 - **Python 3.12+**
-- **Playwright System Dependencies** (Chromium)
+- **Google Chrome** (installed system-wide — undetected-chromedriver uses your real Chrome binary)
 - **Local Ollama Instance** (installed and running)
 - **SQLite3**
 
@@ -46,26 +46,22 @@ The system operates in a robust, **two-stage pipeline**:
 Clone the repository to your local machine, navigate to the directory, and install the package along with development requirements:
 ```bash
 # Create and activate virtual environment
-python -m venv .venv
+py -m venv .venv
 .venv\Scripts\activate  # Windows
 
 # Install Flat Finder with development dependencies
 pip install -e ".[dev]"
 ```
 
-### 2. Install Playwright Browsers
-Download the required Playwright Chromium binaries:
-```bash
-playwright install chromium
-```
-
-### 3. Configure the Environment
+### 2. Configure the Environment
 Copy the environment template and adjust paths or logging thresholds as needed:
 ```bash
 copy .env.example .env
 ```
 
-### 4. Local Ollama Setup
+> **Note:** No browser binary downloads needed. `undetected-chromedriver` automatically detects and patches your locally installed Google Chrome.
+
+### 3. Local Ollama Setup
 Start your local Ollama application, then pull your target LLM model (default is `llama3.1`):
 ```bash
 ollama serve
@@ -91,75 +87,75 @@ Flat Finder enforces a clean local-first workspace structure:
   - `data/raw/`: Generated CSV exports.
   - `data/images/`: Locally downloaded listing pictures, grouped by source ID.
   - `data/logs/`: Production logs (`flat_finder.log`).
-  - `data/browser_state/`: Saved Facebook persistent login cookies.
+  - `data/browser_state/`: Saved Facebook persistent login cookies and Chrome user-data profile.
   - `data/screenshots/`: Debug screenshots captured during navigation errors.
 
 ---
 
 ## 🎛️ CLI Usage
 
-Flat Finder provides a feature-rich CLI via Typer. Once installed, run commands using `python -m app.cli` or directly via the `flat-finder` shortcut.
+Flat Finder provides a feature-rich CLI via Typer. Once installed, run commands using `py -m app.cli` or directly via the `flat-finder` shortcut.
 
 ### 1. Initialize the Database
 Build SQLite schemas, unique constraints, and search indexes:
 ```bash
-python -m app.cli init-db
+py -m app.cli init-db
 ```
 
 ### 2. Discover Configured Sites
 Verify loaded site configs and active statuses:
 ```bash
-python -m app.cli list-sites
+py -m app.cli list-sites
 ```
 
 ### 3. Test Selectors Validate Config
-Test-load a site config configuration mapping without launching Playwright:
+Test-load a site config configuration mapping without launching a browser:
 ```bash
-python -m app.cli test-site --site example_sreality
+py -m app.cli test-site --site example_sreality
 ```
 
 ### 4. Run Phase 1: Scrape Raw Listings
 Fetch listing cards and save raw rows into the database:
 ```bash
 # Scrape all active enabled sites
-python -m app.cli scrape --site all
+py -m app.cli scrape --site all
 
 # Scrape a specific named site
-python -m app.cli scrape --site example_sreality
+py -m app.cli scrape --site example_sreality
 ```
 
 ### 5. Run Phase 2: LLM Enrichment Pass
 Process raw listings with Ollama structured generation and calculate Prague suitability:
 ```bash
 # Process all pending rows
-python -m app.cli enrich --site all
+py -m app.cli enrich --site all
 
 # Enrich a limited subset of listings
-python -m app.cli enrich --site all --limit 10
+py -m app.cli enrich --site all --limit 10
 ```
 
 ### 6. Run the Full Pipeline
 Scrape target sites, then immediately enrich newly logged listings in a single pass:
 ```bash
-python -m app.cli run --site all
+py -m app.cli run --site all
 ```
 
 ### 7. Download Images
 Locally save main and secondary image assets:
 ```bash
-python -m app.cli download-images --site all --max-images 5
+py -m app.cli download-images --site all --max-images 5
 ```
 
 ### 8. Export CSV
 Generate sorted, Prague commute-scored outputs for spreadsheet comparison:
 ```bash
-python -m app.cli export-csv --output data/raw/prague_listings.csv
+py -m app.cli export-csv --output data/raw/prague_listings.csv
 ```
 
 ### 9. Launch Localhost Web App Dashboard
 Explore, search, filter, sort, and exclude aggregated real-estate listings directly from a sleek glassmorphic browser user interface:
 ```bash
-python -m app.cli serve
+py -m app.cli serve
 ```
 Then open your browser and navigate to `http://localhost:8000`.
 
@@ -187,7 +183,7 @@ To integrate a new website, create a single YAML file under `configs/sites/[site
 3. Fill in target CSS selectors under `fields` (card level) and `detail_fields` (page level if hybrid mode is active).
 4. Run the validation check command:
    ```bash
-   python -m app.cli test-site --site [your_site_name]
+   py -m app.cli test-site --site [your_site_name]
    ```
 5. Mark `enabled: true` and execute the scraper pipeline.
 
@@ -203,14 +199,14 @@ Flat Finder includes a separate Facebook group scraper (`facebook_group`) to har
 ### Persist Manual Cookie Credentials Session
 To bypass basic logins, launch a manual browser session. Log in to Facebook normally, solve MFA prompts, then return to your console and click Enter:
 ```bash
-python -m app.cli login-facebook
+py -m app.cli login-facebook
 ```
-This stores your cookie credentials into `data/browser_state/facebook.json`.
+This stores your cookie credentials into `data/browser_state/` as a persistent Chrome profile.
 
 ### Run Facebook Scraper
-Execute the visible post text parser using your saved persistent session cookie:
+Execute the visible post text parser using your saved persistent session:
 ```bash
-python -m app.cli scrape-facebook
+py -m app.cli scrape-facebook
 ```
 
 ---
