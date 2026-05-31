@@ -13,15 +13,18 @@ Service and local laws. Use with caution.
 from __future__ import annotations
 
 import json
-from datetime import datetime
+import time
+from datetime import datetime, timezone
 from typing import Any
+
+from selenium.webdriver.common.by import By
+from selenium.common.exceptions import NoSuchElementException, StaleElementReferenceException
 
 from app.browser import BrowserManager
 from app.config import AppSettings, SiteConfig
 from app.logging_config import get_logger
 from app.models import RawListing
 from app.scrapers.base import BaseScraper
-from playwright.sync_api import Page
 
 logger = get_logger("app.scrapers.facebook")
 
@@ -38,12 +41,11 @@ class FacebookSourceScraper(BaseScraper):
             state_path = str(self.settings.browser_state_dir / "facebook.json")
 
         logger.info("Initializing persistent context for Facebook scraping...")
-        context = self.browser_manager.get_persistent_context(
+        driver = self.browser_manager.get_persistent_context(
             storage_state_path=state_path,
             headless=self.site_config.browser.headless,
         )
 
-        page = context.new_page()
         listings: list[RawListing] = []
 
         try:
@@ -53,10 +55,10 @@ class FacebookSourceScraper(BaseScraper):
                 return []
 
             for group_url in urls:
-                group_listings = self._scrape_group(page, group_url)
+                group_listings = self._scrape_group(driver, group_url)
                 listings.extend(group_listings)
         finally:
-            page.close()
+            self.browser_manager.stop()
 
         logger.info("Facebook scraping done. Discovered %d posts.", len(listings))
         return listings
@@ -115,13 +117,16 @@ class FacebookSourceScraper(BaseScraper):
             logger.warning("LLM text enrichment failed (%s); keeping original.", exc)
             return text
 
-    def _scrape_group(self, page: Page, group_url: str) -> list[RawListing]:
+    def _scrape_group(self, driver: Any, group_url: str) -> list[RawListing]:
         """Navigate to group, scroll N times to trigger post rendering, and extract content."""
         logger.info("Loading Facebook group URL: %s", group_url)
-        page.goto(group_url, wait_until="domcontentloaded")
-        page.wait_for_timeout(3000)  # settle pause
+        driver.get(group_url)
+        time.sleep(3)  # settle pause
 
-        if "login" in page.url or page.query_selector("input[name='email']"):
+        # Login check
+        current_url = driver.current_url
+        login_inputs = driver.find_elements(By.CSS_SELECTOR, "input[name='email']")
+        if "login" in current_url or login_inputs:
             logger.error(
                 "Facebook login screen detected. Please execute standard login first "
                 "via command: python -m app.cli login-facebook"
@@ -130,7 +135,7 @@ class FacebookSourceScraper(BaseScraper):
 
         scrolls = self.site_config.facebook.scroll_iterations
         logger.info("Scrolling Facebook group page %d times...", scrolls)
-        self.browser_manager.scroll_n_times(page, scrolls, pause_ms=1800)
+        self.browser_manager.scroll_n_times(driver, scrolls, pause_ms=1800)
 
         # ---------------------------------------------------------------------------
         # Selector strategy (updated for 2025 Facebook markup):
@@ -140,7 +145,7 @@ class FacebookSourceScraper(BaseScraper):
         # are still present but may be wrapped in extra divs.
         #
         # Most reliable approach: look for the feed container first, then grab
-        # its direct article children.  Fall back to any div[role='article'] on
+        # its direct article children. Fall back to any div[role='article'] on
         # the page if the feed container is absent.
         #
         # Text is always inside `div[dir='auto']` elements; the longest such chunk
@@ -151,14 +156,13 @@ class FacebookSourceScraper(BaseScraper):
         # ---------------------------------------------------------------------------
         post_sel = self.site_config.facebook.post_selector
         if not post_sel:
-            # Try feed-scoped articles first, fall back to page-wide
-            feed = page.query_selector("div[role='feed']")
-            if feed:
-                posts = feed.query_selector_all("div[role='article']")
+            feeds = driver.find_elements(By.CSS_SELECTOR, "div[role='feed']")
+            if feeds:
+                posts = feeds[0].find_elements(By.CSS_SELECTOR, "div[role='article']")
             else:
-                posts = page.query_selector_all("div[role='article']")
+                posts = driver.find_elements(By.CSS_SELECTOR, "div[role='article']")
         else:
-            posts = page.query_selector_all(post_sel)
+            posts = driver.find_elements(By.CSS_SELECTOR, post_sel)
 
         logger.info("Found %d visible post articles on Facebook group.", len(posts))
 
@@ -168,20 +172,24 @@ class FacebookSourceScraper(BaseScraper):
             try:
                 # ------------------------------------------------------------------
                 # Text extraction
-                # Collect all dir="auto" text nodes and pick the longest one with
-                # meaningful length.  This handles both short + long posts reliably.
+                # Collect all dir="auto" text nodes and pick the longest one.
                 # ------------------------------------------------------------------
                 text_content = ""
-                for te in post.query_selector_all("div[dir='auto'], span[dir='auto']"):
-                    txt = (te.inner_text() or "").strip()
-                    if len(txt) > len(text_content):
-                        text_content = txt
+                for te in post.find_elements(By.CSS_SELECTOR, "div[dir='auto'], span[dir='auto']"):
+                    try:
+                        txt = (te.text or "").strip()
+                        if len(txt) > len(text_content):
+                            text_content = txt
+                    except StaleElementReferenceException:
+                        continue
 
                 # Also try the "See more" expanded block pattern used on newer FB
                 if not text_content:
-                    see_more = post.query_selector("[data-ad-rendering-role='story_message']")
-                    if see_more:
-                        text_content = (see_more.inner_text() or "").strip()
+                    see_more_els = post.find_elements(
+                        By.CSS_SELECTOR, "[data-ad-rendering-role='story_message']"
+                    )
+                    if see_more_els:
+                        text_content = (see_more_els[0].text or "").strip()
 
                 if not text_content or len(text_content) < 20:
                     continue  # skip image-only or near-empty posts
@@ -200,8 +208,6 @@ class FacebookSourceScraper(BaseScraper):
 
                 # ------------------------------------------------------------------
                 # LLM flat-offer classification
-                # Skip posts that are not actual rental listings (e.g. questions,
-                # recommendations, community posts, etc.)
                 # ------------------------------------------------------------------
                 if not self._is_flat_offer(text_content):
                     logger.debug("Post #%d classified as non-flat-offer; skipping.", idx)
@@ -209,13 +215,11 @@ class FacebookSourceScraper(BaseScraper):
 
                 # ------------------------------------------------------------------
                 # LLM text enrichment
-                # Extend / clean the raw post text into a richer description.
                 # ------------------------------------------------------------------
                 enriched_text = self._enrich_text_with_llm(text_content)
 
                 # ------------------------------------------------------------------
                 # Permalink extraction
-                # Match both /posts/ and story_fbid patterns
                 # ------------------------------------------------------------------
                 permalink = None
                 for link_sel in (
@@ -223,9 +227,9 @@ class FacebookSourceScraper(BaseScraper):
                     "a[href*='story_fbid']",
                     "a[href*='?fbid']",
                 ):
-                    link_elem = post.query_selector(link_sel)
-                    if link_elem:
-                        href = link_elem.get_attribute("href") or ""
+                    link_els = post.find_elements(By.CSS_SELECTOR, link_sel)
+                    if link_els:
+                        href = (link_els[0].get_attribute("href") or "").strip()
                         if href:
                             permalink = href.split("?")[0]
                             if not permalink.startswith("http"):
@@ -236,41 +240,39 @@ class FacebookSourceScraper(BaseScraper):
                     permalink = f"{group_url}#post_{idx}"
 
                 # ------------------------------------------------------------------
-                # Image URLs
-                # Filter out tiny sprite icons served from rsrc.php and UI avatars
+                # Image URLs — filter out tiny sprites and UI avatars
                 # ------------------------------------------------------------------
                 image_urls = []
-                for img in post.query_selector_all("img[src]"):
-                    src = img.get_attribute("src") or ""
-                    if (
-                        src
-                        and "emoji" not in src
-                        and "/rsrc.php/" not in src
-                        and "fbcdn" in src
-                        and "_s." not in src  # exclude tiny thumbnail variants
-                    ):
-                        image_urls.append(src)
+                for img in post.find_elements(By.CSS_SELECTOR, "img[src]"):
+                    try:
+                        src = (img.get_attribute("src") or "").strip()
+                        if (
+                            src
+                            and "emoji" not in src
+                            and "/rsrc.php/" not in src
+                            and "fbcdn" in src
+                            and "_s." not in src
+                        ):
+                            image_urls.append(src)
+                    except StaleElementReferenceException:
+                        continue
 
                 primary_img = image_urls[0] if image_urls else None
 
                 # ------------------------------------------------------------------
                 # Poster name
-                # FB renders the author inside a <strong> or the first <a role='link'>
-                # inside the post header area.
                 # ------------------------------------------------------------------
                 poster_name = None
                 for name_sel in ("strong span", "h2 span", "h3 span", "a[role='link'] strong"):
-                    poster_elem = post.query_selector(name_sel)
-                    if poster_elem:
-                        name_txt = (poster_elem.inner_text() or "").strip()
+                    name_els = post.find_elements(By.CSS_SELECTOR, name_sel)
+                    if name_els:
+                        name_txt = (name_els[0].text or "").strip()
                         if name_txt:
                             poster_name = name_txt
                             break
 
                 # ------------------------------------------------------------------
                 # Timestamp
-                # New markup uses <a> with an aria-label containing the date string,
-                # or a nested <abbr> / <span> with a title attribute.
                 # ------------------------------------------------------------------
                 timestamp_text = None
                 for ts_sel in (
@@ -278,9 +280,9 @@ class FacebookSourceScraper(BaseScraper):
                     "abbr[data-utime]",
                     "span[id] a span",
                 ):
-                    time_elem = post.query_selector(ts_sel)
-                    if time_elem:
-                        ts_txt = (time_elem.inner_text() or "").strip()
+                    ts_els = post.find_elements(By.CSS_SELECTOR, ts_sel)
+                    if ts_els:
+                        ts_txt = (ts_els[0].text or "").strip()
                         if ts_txt:
                             timestamp_text = ts_txt
                             break
@@ -321,7 +323,7 @@ class FacebookSourceScraper(BaseScraper):
                 raw.set_metadata({
                     "poster_name": poster_name,
                     "timestamp_text": timestamp_text,
-                    "scraped_at": datetime.utcnow().isoformat(),
+                    "scraped_at": datetime.now(timezone.utc).isoformat(),
                     "source_group": group_url,
                     "original_text": text_content,
                 })
@@ -336,17 +338,16 @@ class FacebookSourceScraper(BaseScraper):
 
     @classmethod
     def login_facebook(cls, browser_manager: BrowserManager, storage_state_path: str) -> None:
-        """Open persistent chrome browser and halt execution for manual credential login."""
-        logger.info("Initializing Playwright manual session launch...")
-        context = browser_manager.get_persistent_context(
+        """Open persistent Chrome browser and halt execution for manual credential login."""
+        logger.info("Opening persistent Chrome for manual Facebook login...")
+        driver = browser_manager.get_persistent_context(
             storage_state_path=storage_state_path,
             headless=False,
         )
-        page = context.new_page()
 
         try:
             logger.info("Navigating to facebook.com...")
-            page.goto("https://www.facebook.com/")
+            driver.get("https://www.facebook.com/")
             print("\n" + "=" * 80)
             print("FACEBOOK MANUAL LOGIN ASSISTANCE:")
             print("1. A browser window has opened to facebook.com.")
@@ -363,5 +364,4 @@ class FacebookSourceScraper(BaseScraper):
 
             logger.info("Facebook authentication successfully persisted in user_data_dir.")
         finally:
-            page.close()
             browser_manager.stop()
