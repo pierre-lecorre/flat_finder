@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import sqlite3
 from contextlib import contextmanager
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Generator, Optional
 
@@ -95,7 +95,7 @@ class Database:
         Returns (listing_id, was_inserted).
         """
         was_inserted = False
-        now_str = datetime.utcnow().isoformat()
+        now_str = datetime.now(timezone.utc).isoformat()
 
         with self.connection() as conn:
             # Check by external_id if present
@@ -208,7 +208,7 @@ class Database:
 
     def insert_enriched_listing(self, enriched: EnrichedListing) -> int:
         """Upsert/replace an enriched listing record."""
-        now_str = datetime.utcnow().isoformat()
+        now_str = datetime.now(timezone.utc).isoformat()
         with self.connection() as conn:
             cursor = conn.execute(
                 """
@@ -257,7 +257,7 @@ class Database:
 
     def insert_image(self, img: ImageRecord) -> int:
         """Insert a downloaded image record."""
-        now_str = datetime.utcnow().isoformat()
+        now_str = datetime.now(timezone.utc).isoformat()
         with self.connection() as conn:
             cursor = conn.execute(
                 """

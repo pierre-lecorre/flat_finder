@@ -7,7 +7,7 @@ and other housing preferences.
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 
 from app.config import ScoringWeights
@@ -191,7 +191,7 @@ def normalize_raw_listing(
     # Contextual fields parsed from combined title and description
     desc = raw.raw_description or ""
     search_text = f"{(raw.raw_title or '')} {desc}"
-    
+
     furnished = parse_furnished(search_text)
     if furnished == "unknown" and raw.raw_metadata_json:
         # Check raw metadata
@@ -254,7 +254,7 @@ def normalize_raw_listing(
         commute_note=commute_note,
         llm_summary=None,
         llm_json=None,
-        enriched_at=datetime.utcnow(),
+        enriched_at=datetime.now(timezone.utc),
     )
 
     # Compute final score
