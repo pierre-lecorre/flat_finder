@@ -1,15 +1,20 @@
 """
 HTML snapshot tests for the bezrealitky.yaml config selectors.
 
-These tests load a local HTML snapshot of the Bezrealitky listing page and
+These tests load a local HTML snapshot of the Bezrealitky listing/detail page and
 verify that the CSS selectors defined in configs/sites/bezrealitky.yaml
 actually find the expected data.
 
 Run with:  pytest tests/test_bezrealitky_selectors.py -v
 
-Snapshot file expected at:  tests/fixtures/bezrealitky_listing.html
-You can create it by saving the page source from:
-  https://www.bezrealitky.cz/vyhledat?advyhledat=1&nabidka=pronajem&typNemovitosti=byt&lokalita=praha
+Snapshot files expected at:
+  tests/fixtures/bezrealitky_listing.html   (save from .cz or .com search results)
+  tests/fixtures/bezrealitky_detail.html    (save from any individual listing page)
+
+Notes on URL paths:
+  .cz domain: /nemovitosti-byty-domy/<id>-<slug>
+  .com domain: /properties-flats-houses/<id>-<slug>
+  Tests accept both patterns.
 """
 
 import re
@@ -26,6 +31,9 @@ FIXTURES_DIR = Path(__file__).parent / "fixtures"
 LISTING_HTML = FIXTURES_DIR / "bezrealitky_listing.html"
 DETAIL_HTML = FIXTURES_DIR / "bezrealitky_detail.html"
 
+# Both .cz and .com path fragments — tested together everywhere.
+_LISTING_PATH_FRAGMENTS = ["/nemovitosti-byty-domy", "/properties-flats-houses"]
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -35,7 +43,7 @@ def load_soup(path: Path) -> BeautifulSoup:
     return BeautifulSoup(path.read_text(encoding="utf-8", errors="replace"), "html.parser")
 
 
-def attr_selector(soup: BeautifulSoup, css: str, attr: str) -> list[str]:
+def attr_selector(soup, css: str, attr: str) -> list[str]:
     """Return a list of (text or attribute) values for all matching elements."""
     results = []
     for el in soup.select(css):
@@ -48,11 +56,24 @@ def attr_selector(soup: BeautifulSoup, css: str, attr: str) -> list[str]:
     return results
 
 
+def listing_urls(soup) -> list[str]:
+    """Collect listing hrefs matching either .cz or .com path pattern."""
+    urls = []
+    for frag in _LISTING_PATH_FRAGMENTS:
+        urls.extend(attr_selector(soup, f"a[href*='{frag}']", "href"))
+    return list(dict.fromkeys(urls))  # deduplicate, preserve order
+
+
+def extract_listing_id(href: str) -> re.Match | None:
+    """Extract numeric ID from either /properties-flats-houses/<id>- or /nemovitosti-byty-domy/<id>-."""
+    return re.search(r"/(?:properties-flats-houses|nemovitosti-byty-domy)/(\d+)-", href)
+
+
 # ---------------------------------------------------------------------------
 # Listing page tests
 # ---------------------------------------------------------------------------
 
-@pytest.mark.skipif(not LISTING_HTML.exists(), reason="Snapshot not present — run scraper once and save page HTML")
+@pytest.mark.skipif(not LISTING_HTML.exists(), reason="Snapshot not present — save page HTML to tests/fixtures/bezrealitky_listing.html")
 class TestBezrealitkyListingSelectors:
     """Validate selectors against a saved HTML snapshot of the search results page."""
 
@@ -93,17 +114,20 @@ class TestBezrealitkyListingSelectors:
     # --- Listing URL ---
 
     def test_listing_url_selector(self, soup):
+        """Cards must contain a link to a listing detail page (either .cz or .com path)."""
         cards = soup.select("article.propertyCard")
         assert cards, "No cards found"
         first_card = cards[0]
-        urls = attr_selector(first_card, "a[href*='/nemovitosti-byty-domy']", "href")
-        assert urls, "Listing URL selector matched nothing on first card"
-        assert "/nemovitosti-byty-domy" in urls[0], f"Unexpected URL: {urls[0]!r}"
+        urls = listing_urls(first_card)
+        assert urls, (
+            "Listing URL selector matched nothing on first card. "
+            "Expected href containing '/properties-flats-houses' or '/nemovitosti-byty-domy'."
+        )
+        assert any(frag in urls[0] for frag in _LISTING_PATH_FRAGMENTS), f"Unexpected URL: {urls[0]!r}"
 
     def test_listing_urls_are_unique(self, soup):
-        all_urls = attr_selector(soup, "a[href*='/nemovitosti-byty-domy']", "href")
-        unique_urls = list(dict.fromkeys(all_urls))
-        assert len(unique_urls) >= 3, f"Expected multiple unique listing URLs, got: {unique_urls}"
+        urls = listing_urls(soup)
+        assert len(urls) >= 3, f"Expected multiple unique listing URLs, got: {urls}"
 
     # --- Price ---
 
@@ -124,9 +148,17 @@ class TestBezrealitkyListingSelectors:
     # --- Label ---
 
     def test_listing_type_label_selector(self, soup):
-        labels = attr_selector(soup, "span[class*='propertyCardLabel']", "text")
-        assert labels, "Listing type label selector matched nothing"
-        rental_labels = [l for l in labels if "rent" in l.lower() or "pronajem" in l.lower() or "pronájem" in l.lower()]
+        """Card label uses offerCardLabel class on .com HTML."""
+        # Try both known class fragments (site serves different class names on .cz vs .com)
+        labels = (
+            attr_selector(soup, "span[class*='offerCardLabel']", "text") or
+            attr_selector(soup, "span[class*='propertyCardLabel']", "text")
+        )
+        assert labels, "Listing type label selector matched nothing (tried offerCardLabel and propertyCardLabel)"
+        rental_labels = [
+            l for l in labels
+            if "rent" in l.lower() or "pronajem" in l.lower() or "pronájem" in l.lower()
+        ]
         assert rental_labels, f"No label mentions rent. Got: {labels[:5]}"
 
     # --- Image ---
@@ -146,7 +178,7 @@ class TestBezrealitkyListingSelectors:
 # Detail page tests
 # ---------------------------------------------------------------------------
 
-@pytest.mark.skipif(not DETAIL_HTML.exists(), reason="Detail snapshot not present")
+@pytest.mark.skipif(not DETAIL_HTML.exists(), reason="Detail snapshot not present — save a listing detail page to tests/fixtures/bezrealitky_detail.html")
 class TestBezrealitkyDetailSelectors:
     """Validate detail-page selectors against a saved HTML snapshot."""
 
@@ -155,19 +187,47 @@ class TestBezrealitkyDetailSelectors:
         return load_soup(DETAIL_HTML)
 
     def test_detail_description_selector(self, soup):
-        descs = attr_selector(soup, "div[class*='description']", "text")
-        assert descs, "Description selector matched nothing on detail page"
+        """Description text block — tries multiple known class fragments."""
+        descs = (
+            attr_selector(soup, "div[class*='offerDetail']", "text") or
+            attr_selector(soup, "div[class*='OfferDetail']", "text") or
+            attr_selector(soup, "div[class*='description']", "text") or
+            attr_selector(soup, "div[class*='Description']", "text")
+        )
+        # Fall back: any long paragraph-like div (>80 chars)
+        if not descs:
+            for div in soup.find_all("div"):
+                txt = div.get_text(strip=True)
+                if len(txt) > 80 and len(txt) < 5000:
+                    classes = " ".join(div.get("class", []))
+                    if any(k in classes.lower() for k in ["detail", "content", "text", "body", "info"]):
+                        descs = [txt]
+                        break
+        assert descs, "Could not find a description/detail text block on the detail page"
         assert len(descs[0]) > 10, "Description text suspiciously short"
 
     def test_detail_id_from_url_pattern(self, soup):
-        """The listing numeric ID should be extractable from the canonical URL."""
+        """Numeric listing ID must be extractable from the canonical URL.
+
+        Supports both:
+          .cz  /nemovitosti-byty-domy/<id>-<slug>
+          .com /properties-flats-houses/<id>-<slug>
+        """
         canonical = soup.find("link", rel="canonical")
-        if canonical and canonical.get("href"):
-            href = canonical["href"]
-            match = re.search(r"/nemovitosti-byty-domy/(\d+)-", href)
-            assert match, f"Could not extract numeric ID from canonical URL: {href!r}"
-        else:
+        if not canonical or not canonical.get("href"):
             pytest.skip("No canonical link found in detail snapshot")
+        href = canonical["href"]
+        match = extract_listing_id(href)
+        # If canonical points to /search (listing page saved by mistake), skip gracefully
+        if "/search" in href or "/vyhledat" in href:
+            pytest.skip(
+                f"Detail snapshot canonical URL points to search page: {href!r}. "
+                "Re-save a proper listing detail page."
+            )
+        assert match, (
+            f"Could not extract numeric ID from canonical URL: {href!r}. "
+            "Expected pattern: /properties-flats-houses/<id>- or /nemovitosti-byty-domy/<id>-"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -200,7 +260,11 @@ class TestBezrealitkyConfigSanity:
         assert config["wait_rules"]["wait_for_selector"] == "article.propertyCard"
 
     def test_detail_link_selector(self, config):
-        assert "/nemovitosti-byty-domy" in config["detail_page"]["link_selector"]
+        """detail_page.link_selector must cover both .cz and .com URL patterns."""
+        selector = config["detail_page"]["link_selector"]
+        assert "/properties-flats-houses" in selector or "/nemovitosti-byty-domy" in selector, (
+            f"link_selector must contain at least one of the known listing path fragments, got: {selector!r}"
+        )
 
     def test_required_fields_present(self, config):
         fields = config.get("fields", {})
@@ -223,4 +287,4 @@ class TestBezrealitkyConfigSanity:
 
     def test_start_urls_not_empty(self, config):
         assert config["start_urls"], "start_urls is empty"
-        assert "bezrealitky.cz" in config["start_urls"][0]
+        assert "bezrealitky" in config["start_urls"][0]

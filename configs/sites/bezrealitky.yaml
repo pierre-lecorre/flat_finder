@@ -11,6 +11,7 @@ search_url_templates:
 
 allowed_domains:
   - "bezrealitky.cz"
+  - "bezrealitky.com"
 
 # Listing item card container
 # Real selector from live HTML (Next.js app — classes contain hashed suffixes,
@@ -21,8 +22,9 @@ extraction_mode: "hybrid"
 
 detail_page:
   enabled: true
-  # Each card carousel slide contains an <a href="/nemovitosti-byty-domy..."> link
-  link_selector: "a[href*='/nemovitosti-byty-domy']"
+  # Cards use /properties-flats-houses/... on .com and /nemovitosti-byty-domy/... on .cz
+  # Both path fragments are matched here.
+  link_selector: "a[href*='/properties-flats-houses'], a[href*='/nemovitosti-byty-domy']"
 
 pagination:
   type: "page_param"
@@ -57,11 +59,12 @@ fields:
     selector: "span[class*='propertyPricePerMeter']"
     attr: "text"
   listing_type:
-    # Label — e.g. "Apartment for rent"
-    selector: "span[class*='propertyCardLabel']"
+    # Label — e.g. "Apartment for rent" / "Flat to rent"
+    selector: "span[class*='offerCardLabel']"
     attr: "text"
   listing_url:
-    selector: "a[href*='/nemovitosti-byty-domy']"
+    # Matches both .cz and .com URL paths
+    selector: "a[href*='/properties-flats-houses'], a[href*='/nemovitosti-byty-domy']"
     attr: "href"
   image_url:
     selector: "div[class*='propertyCardImageHolder'] img"
@@ -70,11 +73,13 @@ fields:
 # Selectors on the detail page
 detail_fields:
   description:
-    selector: "div[class*='description'], div[class*='b-description']"
+    # Description block — stable fragment 'offerDetailDescription' or 'OfferDetail'
+    selector: "div[class*='offerDetail'], div[class*='OfferDetail'], div[class*='description']"
     attr: "text"
   external_id:
-    # URL slug contains the numeric ID — e.g. /nemovitosti-byty-domy/32696-...
-    # The ID is parsed from listing_url in post-processing.
+    # Numeric ID extracted from URL path:
+    # /properties-flats-houses/32696-... or /nemovitosti-byty-domy/32696-...
+    # Parsed in post-processing via regex (\d+) after path segment.
     selector: ""
     attr: ""
 
@@ -100,11 +105,14 @@ browser:
 
 notes: |
   Bezrealitky is a Next.js SPA. CSS class names contain hashed suffixes (e.g.
-  `PropertyCardpropertyCardAddresshNqyR`), so selectors use `[class*='...']`
+  `OfferCardofferCardLabelXxYy`), so selectors use `[class*='...']`
   attribute matching on the stable camelCase fragment.
 
   Key structural facts from live HTML snapshot (2026-05-31):
-    - Each listing is <article class="propertyCard ..."> — `article.propertyCard` is stable.
-    - Clicking a card opens the detail at /nemovitosti-byty-domy/<id>-<slug>.
+    - Each listing card: <article class="propertyCard ..."> — stable.
+    - The .cz domain uses /nemovitosti-byty-domy/<id>-<slug> paths.
+    - The .com domain (English) uses /properties-flats-houses/<id>-<slug> paths.
+    - Numeric listing ID is the first segment after the path prefix.
     - Price block: amount + optional additional charges + per-m² figure.
-    - Pagination: `?page=N` query param, first page has no param.
+    - Pagination: ?page=N query param.
+    - Card label class: offerCardLabel (not propertyCardLabel as previously assumed).
