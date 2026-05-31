@@ -33,12 +33,44 @@ You must respond ONLY with a single valid JSON object adhering strictly to the p
 Do not wrap your response in markdown code blocks or add prefix/suffix conversational text.
 """
 
+IS_FLAT_OFFER_SYSTEM_PROMPT = """You are a classifier for a real-estate scraping pipeline.
+Your only job is to decide whether a Facebook group post is an actual rental listing
+for a flat, apartment, room, or house (i.e. someone offering accommodation for rent).
+
+A post IS a flat offer if it:
+- Describes a specific property available to rent (flat, apartment, room, studio, house)
+- Mentions a price or availability date even implicitly
+- Is written in the first person offering accommodation
+
+A post is NOT a flat offer if it:
+- Is a request/wanted post (someone looking for a flat, not offering one)
+- Is a question, poll, or community discussion
+- Is an advertisement for services (moving, cleaning, etc.)
+- Is a general announcement or group admin message
+- Is spam or unrelated content
+
+Respond ONLY with a single JSON object: {"is_flat_offer": true} or {"is_flat_offer": false}.
+No explanation, no extra fields.
+"""
+
+TEXT_ENRICHMENT_SYSTEM_PROMPT = """You are a real-estate copywriter assistant specializing in Prague rentals.
+You receive a raw, informal Facebook post text and must produce a clean, structured,
+professional rental description in English.
+
+Rules:
+- Preserve ALL factual details: price, size, location, amenities, availability.
+- Fix grammar, punctuation, and formatting.
+- Expand abbreviations common in Czech rental posts (kk = kitchenette, 1+1 = one room + kitchen, etc.).
+- Structure the output as: one opening sentence summary, then bullet points for key facts.
+- Do NOT invent information not present in the original.
+- Output ONLY a JSON object with a single key: {"enriched_text": "..."}.
+"""
+
 
 def build_enrichment_prompt(raw_data: dict) -> str:
     """Combine raw listing data and inject Pydantic response JSON schema to format prompt."""
     schema = LLMEnrichmentResponse.model_json_schema()
 
-    # Format the input data cleanly for the LLM
     data_str = json.dumps(raw_data, indent=2, ensure_ascii=False)
 
     prompt = f"""Analyze the following Czech/English real-estate listing data:
@@ -55,3 +87,26 @@ Your JSON response must conform strictly to the following JSON Schema:
 Ensure all numeric fields are float or null, all boolean fields are true/false/null, and enums match the schema exactly.
 """
     return prompt
+
+
+def build_is_flat_offer_prompt(post_text: str) -> str:
+    """Build a prompt asking the LLM to classify a post as flat offer or not.
+
+    The system prompt is embedded here so it can be passed as Ollama's system field
+    via the caller.  The return value is the *user* prompt; callers should also
+    pass IS_FLAT_OFFER_SYSTEM_PROMPT as the system_prompt argument to OllamaClient.
+    """
+    return (
+        f"Classify the following Facebook post.\n\n"
+        f"POST TEXT:\n{post_text[:2000]}\n\n"
+        f"Respond with JSON: {{\"is_flat_offer\": true}} or {{\"is_flat_offer\": false}}"
+    )
+
+
+def build_text_enrichment_prompt(post_text: str) -> str:
+    """Build a prompt asking the LLM to produce an enriched rental description."""
+    return (
+        f"Rewrite and enrich the following rental post into a clean professional description.\n\n"
+        f"ORIGINAL POST:\n{post_text[:3000]}\n\n"
+        f"Return JSON: {{\"enriched_text\": \"...\"}}"
+    )
